@@ -3,7 +3,7 @@
 Python (FastAPI) service that creates and manages Kubernetes Deployments through a secured REST API.
 Legend: ✅ built and verified · 🟡 built, partly verified · ⬜ not started · ⏸ blocked on a decision
 
-_Last updated: 2026-11-12. Tests: **398 unit + 7 real-cluster integration (no mocks) + 76 curl assertions, all passing**. Verified live on minikube through the ingress (local port 18080)._
+_Last updated: 2026-11-12. Tests: **412 unit + 7 real-cluster integration (no mocks) + 76 curl assertions + 39 UI browser tests (Playwright)**. Verified live on minikube through the ingress (API on port 18080, UI on 8088 via `deploy-ui.localtest.me`). Integration and curl suites need a running cluster and were not re-run after the read-only change._
 
 ## 1. Progress at a glance
 
@@ -28,6 +28,9 @@ _Last updated: 2026-11-12. Tests: **398 unit + 7 real-cluster integration (no mo
 | 13b | No-mock proof: production code/image audited; real-cluster integration suite | ✅ |
 | 13c | Strict input validation (strict ints, anchored regexes, uniform error shape) + edge-case tests | ✅ |
 | 13d | `docs/API_TESTING.md` with per-endpoint commands and real expected responses; `scripts/api-test.sh`; `docs/TECH_STACK.md` | ✅ |
+| 13e | Cluster-wide read, write-only-what-we-own: all namespaces/deployments listed, `managed`/`read_only` flags, 403 on changing read-only items, ClusterRole gains `namespaces: list` | ✅ unit tested; deployed on minikube |
+| 13f | Web UI (React + Vite): dashboard, colour-coded health, namespace filter, detail (replicas, pods, conditions), scale/restart/delete with confirmation, 5 s polling, read-only handling | ✅ 39 Playwright tests; deployed on minikube |
+| 13g | UI image (nginx-unprivileged) + Helm chart `deploy/helm/deploy-ui` (proxy `/api`, Ingress, NetworkPolicy, PDB) | ✅ `helm lint` + `nginx -t` + deployed |
 | 14 | Production hardening (TLS, shared rate limits, OIDC, multi-arch, image scan) | ⬜ see §7 |
 
 ## 2. Features
@@ -94,11 +97,11 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 |---|---|
 | Client → API: JWT HS256 pinned; `exp/iss/aud/sub` required; `alg=none` rejected; uniform 401 | ✅ tested |
 | API → Kubernetes: pod ServiceAccount token (in-cluster config), least-privilege ClusterRole | ✅ live (`kubectl auth can-i` checked) |
-| ClusterRole allows only: namespaces get/create · deployments get/list/create/patch/delete · pods list. **Denied:** secrets, delete namespaces/pods, RBAC, nodes | ✅ live |
+| ClusterRole allows only: namespaces get/list/create · deployments get/list/create/patch/delete · pods list. **Denied:** secrets, delete namespaces/pods, RBAC, nodes | ✅ live (`list namespaces` checked with `kubectl auth can-i`) |
 | Refuses to start with signing secret < 32 bytes | ✅ tested |
 | Roles viewer < operator < admin; per-token namespace allowlist with wildcards | ✅ tested |
-| Protected namespaces hard-coded; enforced in routes **and** service layer; config cannot remove them | ✅ tested; live cluster state diffed |
-| Only objects labelled `managed-by=deploy-api` are listed/changed | ✅ live |
+| Protected namespaces hard-coded **write-protected** (readable, never changed); enforced in routes **and** service layer; config cannot remove them | ✅ tested |
+| Reads are cluster-wide, writes only on objects labelled `managed-by=deploy-api` outside protected namespaces (`read_only` flag, 403 otherwise) | ✅ unit tested (`tests/test_readonly_view.py`); real-cluster assertions updated but not re-run |
 | Cross-tenant ids return 404, not 403 | ✅ tested + live |
 | Strict validation; errors never echo values; Swagger/OpenAPI disabled | ✅ tested |
 | Created pods: securityContext is a **switch, OFF by default** (operator decision): off = pods run as their image intends; on (`DEPLOY_API_POD_HARDENING=true`) = non-root, no privilege escalation, drop ALL caps, read-only rootfs + small `/tmp`, seccomp; no SA token either way | ✅ both modes tested and verified on the cluster |
@@ -122,7 +125,7 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 ## 7. What is left
 
 ### Blocked on you
-0. **Push to GitHub.** The remote `origin` is set (`github.com/prabhinmp/shakudo`, currently empty) and 6 commits are ready, but the sandbox's permission system denied `git push`. Run `git push -u origin main` yourself, or add a Bash permission rule for `git push` and I will do it (and `ci.sh --commit --git-push` will then push after each green build).
+0. ~~Push to GitHub~~ done: `origin/main` (`github.com/prabhinmp/shakudo`) is in sync with local `main`.
 1. **Push the image to a registry.** Your Docker config holds credentials for both **Docker Hub** and **AWS ECR (801935342396.dkr.ecr.ap-south-1.amazonaws.com)**. Pushing publishes the image, so tell me which one and the repository name (e.g. `docker.io/<you>/deploy-api`, or the ECR repo). The CI already supports it: `REGISTRY=<repo> ./scripts/ci.sh --push`. If the target is an EKS cluster, I should also build **multi-arch (amd64+arm64)**: the current image is arm64-only (built on Apple silicon).
 
 ### Should do next

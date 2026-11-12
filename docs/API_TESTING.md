@@ -77,7 +77,7 @@ Run section 1 first (it defines `$BASE`, `$ADMIN`, `$OPERATOR`, `$VIEWER`, `$OTH
 | 6 | `PATCH /api/deployments/{id}` | operator | 200 | 400, 401, 403, 404, 429, 500 |
 | 7 | `POST /api/deployments/{id}/restart` | operator | 200 | 400, 401, 403, 404, 429, 500 |
 | 8 | `DELETE /api/deployments/{id}` | admin | 204 | 400, 401, 403, 404, 429, 500 |
-| 9 | `GET /api/namespaces` | viewer | 200 | 401, 429 (needs image from commit `c132076`+) |
+| 9 | `GET /api/namespaces` | viewer | 200 | 401, 429 |
 
 ### 1. `GET /healthz`: liveness (no token)
 ```sh
@@ -350,7 +350,7 @@ Foreground cascade: the Deployment stays visible until its pods have terminated 
 }
 ```
 
-### 9. `GET /api/namespaces`: namespaces with managed deployments that this token may see (viewer)
+### 9. `GET /api/namespaces`: every cluster namespace this token may see, including empty and built-in ones (viewer)
 ```sh
 curl -s $BASE/api/namespaces -H "Authorization: Bearer $VIEWER"
 ```
@@ -359,8 +359,12 @@ curl -s $BASE/api/namespaces -H "Authorization: Bearer $VIEWER"
 ```json
 {
   "namespaces": [
+    "default",
     "demo-api",
-    "demo-chat"
+    "demo-chat",
+    "kube-node-lease",
+    "kube-public",
+    "kube-system"
   ]
 }
 ```
@@ -543,7 +547,9 @@ kubectl -n demo-api create deployment foreign --image=hashicorp/http-echo:latest
 FOREIGN_BODY=$(echo "$CREATE_BODY" | sed 's/"name": "echo"/"name": "foreign"/')
 api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d "$FOREIGN_BODY"   # → 409
 kubectl -n demo-api get deploy foreign -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'                          # untouched
-api -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=demo-api"       # → 200, lists only "echo": the API never exposes what it does not manage
+api -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=demo-api"       # → 200, lists "echo" (managed:true) AND "foreign" (managed:false, read_only:true)
+FID=$(curl -s -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=demo-api" | python3 -c 'import sys,json; print(next(d["id"] for d in json.load(sys.stdin) if d["name"]=="foreign"))')
+api -X PATCH $BASE/api/deployments/$FID -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '{"replicas":5}'   # → 403 "Deployment 'foreign' is read-only: it was not created by this API"
 kubectl -n demo-api delete deployment foreign
 ```
 
@@ -640,14 +646,16 @@ curl -s -D - -o /dev/null -H "Authorization: Bearer $VIEWER" $BASE/api/deploymen
 
 ## 7b. Namespaces, health and security headers
 
-*These need an image built from commit `c132076` or later; on an older deployment `/api/namespaces` returns 404.*
+*These need an image built from commit `c132076` or later (and `2732ee0` or later for the cluster-wide view below); on an older deployment `/api/namespaces` returns 404 or lists only namespaces with managed deployments.*
 
-`GET /api/namespaces` returns the namespaces that hold managed deployments **and** that your token may see (for UI filters).
+`GET /api/namespaces` returns **every** cluster namespace (including empty and built-in ones) that your token's `namespaces` claim allows (for UI filters).
+List and detail responses also carry `managed` (created by this API) and `read_only` (in a protected namespace, or not created by this API). Reads are cluster-wide; writes are not.
 List and detail responses also carry a computed `health` field: `healthy`, `degraded` (some replicas missing, or a pod is in
 CrashLoopBackOff/ImagePullBackOff), `down` (wanted but none ready) or `idle` (scaled to zero on purpose).
 
 ```bash
-api -H "Authorization: Bearer $VIEWER" $BASE/api/namespaces                    # → 200 {"namespaces":["demo-api"]}
+api -H "Authorization: Bearer $GOD"    $BASE/api/namespaces                    # → 200 every namespace: default, kube-system, demo-api, ...
+api -H "Authorization: Bearer $VIEWER" $BASE/api/namespaces                    # → 200 {"namespaces":["demo-api"]}  (token claim is ["demo-*"])
 api -H "Authorization: Bearer $OTHER"  $BASE/api/namespaces                    # → 200 {"namespaces":[]}  (other team sees none of ours)
 api $BASE/api/namespaces                                                       # → 401
 curl -s -H "Authorization: Bearer $VIEWER" $BASE/api/deployments/$ID | python3 -c 'import sys,json; print("health:", json.load(sys.stdin)["health"])'
@@ -689,7 +697,15 @@ api -X DELETE $BASE/api/deployments/$ID -H "Authorization: Bearer $OTHER"       
 ```
 
 ### Protected namespaces
-Even a token allowed for `*` can never touch `kube-system`, `kube-public`, `kube-node-lease`, `default` or any `kube-*`.
+Even a token allowed for `*` can never **change** anything in `kube-system`, `kube-public`, `kube-node-lease`, `default` or any `kube-*`. They can be **read**:
+listing returns 200 with `read_only: true` items, and PATCH, restart and DELETE on those return 403 `... is read-only`.
+
+```bash
+api -H "Authorization: Bearer $GOD" "$BASE/api/deployments?namespace=kube-system"        # → 200, e.g. coredns with "read_only": true
+CID=$(curl -s -H "Authorization: Bearer $GOD" "$BASE/api/deployments?namespace=kube-system" | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"])')
+api -X PATCH  $BASE/api/deployments/$CID -H "Authorization: Bearer $GOD" -H "Content-Type: application/json" -d '{"replicas":0}'   # → 403 "... is read-only"
+api -X DELETE $BASE/api/deployments/$CID -H "Authorization: Bearer $GOD"                                                          # → 403
+```
 
 ```bash
 for NS in kube-system kube-public kube-node-lease default; do
@@ -780,7 +796,8 @@ Only registries on the allowlist (`docker.io`, `ghcr.io`) are accepted; `gcr.io`
 | `Connection refused` on :18080 | the port-forward terminal is not running (step 0) |
 | `404 nginx` page | wrong Host header; the ingress only routes `deploy-api.localtest.me` |
 | 403 `... is not in this token's allowed namespaces (demo-*)` | the token's `namespaces` claim does not include that namespace. Mint one that does, or `./scripts/mint-token.sh admin` (defaults to `["*"]`). The API creates missing namespaces itself |
-| 403 `... is protected (built-in Kubernetes namespace)` | `kube-system`, `kube-public`, `kube-node-lease`, `default` and `kube-*` can never be used, by any token |
+| 403 `... is protected (built-in Kubernetes namespace)` | creating into `kube-system`, `kube-public`, `kube-node-lease`, `default` or `kube-*` is refused for every token (they can still be listed read-only) |
+| 403 `Deployment '...' is read-only` | the deployment is in a protected namespace or was not created by this API: visible, never changeable |
 | 401 on every call | secret mismatch: re-run step 1; or the token expired (default 1 h) |
 | 429 right after several 401s | repeated failed auth locks the caller's IP for 60 s. **Through the ingress all clients share the ingress pod's IP**, so wait a minute |
 | DELETE returned 204 but GET still shows the deployment | normal: foreground deletion waits for pods to terminate (up to ~30 s). Poll until 404 |

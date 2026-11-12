@@ -86,3 +86,17 @@ About 1,200 lines of application code in `app/` and about 1,300 lines of tests i
 - **Rate limits are per pod and in memory.** Exact global limits would need a shared store such as Redis.
 - **Local-only cluster tested.** Everything was verified on minikube; managed clusters (EKS, GKE) differ in API-server port, CNI and image architecture
   (the local image is arm64 only).
+
+# Frontend (Web UI)
+
+| Layer | Technology | Version | Why it is used |
+|---|---|---|---|
+| UI library | React | ^18.3.1 | Component UI; state is local hooks, no state library |
+| Build tool | Vite (+ `@vitejs/plugin-react`) | ^6.4.6 | Fast build; `base: '/ui/'`, dev server proxies `/api` to the API |
+| Browser tests | Playwright (`@playwright/test`) | ^1.65.0 | 39 end-to-end tests against an in-browser mocked API (`page.route`) |
+| Runtime image | `nginxinc/nginx-unprivileged` | 1.27-alpine | Serves the built static files as uid 101 on port 8080, proxies `/api/` to the API Service |
+| Build image | `node` | 22-alpine | Multi-stage build, only `dist/` is copied to the runtime image |
+| Packaging | Helm chart `deploy/helm/deploy-ui` | 0.1.0 | Deployment, ConfigMap (nginx.conf), Service, Ingress, NetworkPolicy, PDB; read-only root FS, no SA token |
+
+No runtime dependencies beyond React and ReactDOM; no UI component library, router or HTTP client (plain `fetch`). Polling (5 s) uses a small custom hook.
+The browser talks only to the UI origin, so no CORS is configured anywhere. A CSP (`default-src 'self'`, no inline scripts) is set by nginx on every response.
