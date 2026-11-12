@@ -1,0 +1,6 @@
+apiVersion: v2
+name: deploy-ui
+description: Web UI (static React build served by unprivileged nginx) for the deploy-api backend
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

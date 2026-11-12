@@ -1,0 +1,47 @@
+replicaCount: 2
+
+image:
+  repository: deploy-ui
+  tag: dev
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The backend (deploy-api chart) Service this UI proxies /api/* to. Same origin for the browser => no CORS.
+# Default matches `helm install deploy-api deploy/helm/deploy-api` (service name = <release>-deploy-api).
+backend:
+  host: deploy-api-deploy-api
+  port: 80
+  namespace: ""            # empty = this release's namespace
+  readTimeout: 30s
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Optional ingress (disabled by default). TLS should terminate here in real clusters.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: deploy-ui.example.com
+  tlsSecretName: ""
+
+resources:
+  requests: {cpu: 50m, memory: 32Mi}
+  limits: {cpu: 200m, memory: 64Mi}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  # Who may reach the UI. Default: same namespace only (add your ingress controller's namespace).
+  ingressFrom:
+    - podSelector: {}
+  # Backend pods the UI may call (must match the deploy-api chart's selector labels).
+  backendPodLabels:
+    app.kubernetes.io/name: deploy-api
+
+nodeSelector: {}
+tolerations: []

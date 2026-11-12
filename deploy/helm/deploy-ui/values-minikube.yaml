@@ -1,0 +1,11 @@
+# helm upgrade --install deploy-ui deploy/helm/deploy-ui -n deploy-api -f deploy/helm/deploy-ui/values-minikube.yaml
+ingress:
+  enabled: true
+  className: nginx
+  host: deploy-ui.localtest.me
+networkPolicy:
+  ingressFrom:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx

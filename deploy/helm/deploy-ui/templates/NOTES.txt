@@ -1,0 +1,15 @@
+deploy-ui installed. It proxies /api/* to {{ include "deploy-ui.backendFqdn" . }}:{{ .Values.backend.port }}.
+
+IMPORTANT: if the deploy-api chart has networkPolicy.enabled=true, allow this UI to reach it, e.g. in the
+deploy-api values:
+  networkPolicy:
+    ingressFrom:
+      - podSelector: {matchLabels: {app.kubernetes.io/name: deploy-ui}}
+
+Open it:
+{{- if .Values.ingress.enabled }}
+  http://{{ .Values.ingress.host }}/ui/
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "deploy-ui.fullname" . }} 8081:{{ .Values.service.port }}
+  then http://localhost:8081/ui/
+{{- end }}
