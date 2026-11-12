@@ -135,7 +135,7 @@ Dockerfile
 
 - **Rate limits and the IP lockout are per pod and in-memory.** With 2 replicas the effective limit is double (verified: 240 of 320 requests allowed against a 120 limit). Behind the ingress the lockout sees the ingress pod's IP, so one abusive client can lock out all clients for a minute. Fix: shared store (Redis) and trusting `X-Forwarded-For` only from the ingress.
 - **Cluster-wide RBAC.** Creating namespaces and deployments anywhere requires cluster-scoped permissions, and RBAC cannot deny namespaces. The app's protected-namespace guard is the real barrier.
-- **Hardened pods need compatible images.** Non-root + read-only filesystem breaks images that need root or write to disk (stock `nginx`). Use unprivileged variants or set `config.podReadOnlyRootFs=false`.
+- **Hardened pods need compatible images.** Every pod the API creates runs as non-root (uid 10001) with a read-only root filesystem and no capabilities. Images that expect root or write to their own directories crash with `CrashLoopBackOff`. Verified: stock `nginx:latest` exits with `mkdir() "/var/cache/nginx/client_temp" failed (30: Read-only file system)`, and turning the read-only filesystem off is **not** enough (it then fails with `Permission denied` because uid 10001 cannot write root-owned directories). Use images built for non-root: e.g. `nginxinc/nginx-unprivileged` (listens on **8080**, verified under the same hardening) or `hashicorp/http-echo`.
 - HS256 shared secret, no revocation: use short expiries; move to OIDC/JWKS for production.
 - ID lookup lists all managed deployments (O(n)).
 - No TLS on the local ingress; the image is not yet pushed to a registry; nothing is committed to git yet.

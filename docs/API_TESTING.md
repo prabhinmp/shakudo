@@ -754,4 +754,4 @@ echo "done. Stop the port-forward terminal with Ctrl-C."
 | 429 right after several 401s | repeated failed auth locks the caller's IP for 60 s. **Through the ingress all clients share the ingress pod's IP**, so wait a minute |
 | DELETE returned 204 but GET still shows the deployment | normal: foreground deletion waits for pods to terminate (up to ~30 s). Poll until 404 |
 | 500 `Kubernetes API error ... exceeded quota` | the cluster rejected the request; the message says why |
-| Pod `CreateContainerConfigError` / `CrashLoopBackOff` for another image | pods run non-root with a read-only filesystem. Use an image that supports it (e.g. `nginxinc/nginx-unprivileged`) |
+| Pod `CrashLoopBackOff` / `Error` / `CreateContainerConfigError` (e.g. with `nginx:latest`) | pods run non-root (uid 10001), read-only filesystem. Stock `nginx` crashes: `mkdir() "/var/cache/nginx/client_temp" failed (30: Read-only file system)`; disabling read-only is not enough (`Permission denied`). Use `nginxinc/nginx-unprivileged:latest` with `"port": 8080` (verified). `GET /api/deployments/{id}` shows the pod state and `health` (`down`/`degraded`) |

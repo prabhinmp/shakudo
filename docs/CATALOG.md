@@ -129,7 +129,7 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 3. **Real client IP behind the ingress:** the failed-auth lockout and audit logs currently see the ingress pod's IP (`10.244.0.x`), so one abusive client can lock out everyone for a minute. Fix: trust `X-Forwarded-For` only from the ingress.
 4. **Rate limits are per pod:** with 2 replicas the effective limit doubles (observed). Exact global limits need Redis.
 5. **TLS** on the ingress (cert-manager, or a self-signed cert for local).
-6. **Other images under the hardened pod settings:** verified only with `http-echo`. Stock `nginx` will fail (needs root); test `nginxinc/nginx-unprivileged`.
+6. **Images under the hardened pod settings:** verified with `hashicorp/http-echo` (cluster) and `nginxinc/nginx-unprivileged` (same hardening, Docker, answers 200 on 8080). Stock `nginx:latest` crash-loops (read-only filesystem), and disabling `readOnlyRootFilesystem` alone does not fix it (uid 10001 cannot write root-owned dirs). Consider making the pod user/volumes configurable per request if root-style images must be supported.
 7. **Pin NetworkPolicy egress to the API server CIDR** (`networkPolicy.apiServerCidr`) instead of port-only.
 
 ### Production hardening (later)
