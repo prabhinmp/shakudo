@@ -741,6 +741,36 @@ kubectl delete namespace demo-api scope-demo --wait=false
 echo "done. Stop the port-forward terminal with Ctrl-C."
 ```
 
+## Public images that work with the hardened pods
+
+Every pod the API creates is non-root (uid 10001), has a **read-only root filesystem**, no capabilities and no writable `/tmp`.
+These public images were verified under exactly those settings, both in Docker (HTTP 200) and through this API on the cluster
+(`health: healthy`, pod `1/1 Running`). Use the `port`, `args` and `env` shown.
+
+| Image | `port` | Extra fields | What it is |
+|---|---|---|---|
+| `hashicorp/http-echo:latest` | 5678 | `"args": ["-listen=:5678", "-text=hello"]` | tiny text responder (used throughout this guide) |
+| `traefik/whoami:latest` | 8080 | `"args": ["--port", "8080"]` | prints host and request details |
+| `ghcr.io/stefanprodan/podinfo:latest` | 9898 | none | small demo app with a UI and `/healthz` |
+| `jmalloc/echo-server:latest` | 8080 | `"env": [{"name": "PORT", "value": "8080"}]` | echoes the request |
+| `ealen/echo-server:latest` | 8080 | `"env": [{"name": "PORT", "value": "8080"}]` | echoes the request as JSON |
+| `mendhak/http-https-echo:latest` | 8080 | none | echoes the request as JSON |
+
+**Do not work** under these settings (verified): `nginx:latest` (`mkdir() "/var/cache/nginx/client_temp" failed: Read-only file system`) and
+`nginxinc/nginx-unprivileged:latest` (`mkdir() "/tmp/proxy_temp" failed: Read-only file system`). Both run only if the read-only filesystem is turned
+off (`DEPLOY_API_POD_READ_ONLY_ROOT_FS=false`), and stock `nginx` still fails then (`Permission denied`, root-owned directories).
+Only registries on the allowlist (`docker.io`, `ghcr.io`) are accepted; `gcr.io`, `quay.io` or `registry.k8s.io` images get a 400 unless
+`DEPLOY_API_ALLOWED_REGISTRIES` is extended.
+
+Example (any row above):
+
+```sh
+curl -s -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN_ANY" -H "Content-Type: application/json" -d '{
+  "name": "whoami", "namespace": "testuser-api", "image": "traefik/whoami:latest", "port": 8080, "args": ["--port", "8080"],
+  "resources": {"requests": {"cpu": "20m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "128Mi"}}
+}'
+```
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -754,4 +784,4 @@ echo "done. Stop the port-forward terminal with Ctrl-C."
 | 429 right after several 401s | repeated failed auth locks the caller's IP for 60 s. **Through the ingress all clients share the ingress pod's IP**, so wait a minute |
 | DELETE returned 204 but GET still shows the deployment | normal: foreground deletion waits for pods to terminate (up to ~30 s). Poll until 404 |
 | 500 `Kubernetes API error ... exceeded quota` | the cluster rejected the request; the message says why |
-| Pod `CrashLoopBackOff` / `Error` / `CreateContainerConfigError` (e.g. with `nginx:latest`) | pods run non-root (uid 10001), read-only filesystem. Stock `nginx` crashes: `mkdir() "/var/cache/nginx/client_temp" failed (30: Read-only file system)`; disabling read-only is not enough (`Permission denied`). Use `nginxinc/nginx-unprivileged:latest` with `"port": 8080` (verified). `GET /api/deployments/{id}` shows the pod state and `health` (`down`/`degraded`) |
+| Pod `CrashLoopBackOff` / `Error` (e.g. `nginx:latest`, `nginx-unprivileged`: `mkdir() ... Read-only file system`) | the image writes to its own filesystem, but pods are non-root + read-only with no writable `/tmp`. Pick an image from [Public images that work with the hardened pods](#public-images-that-work-with-the-hardened-pods). `GET /api/deployments/{id}` shows the container state and `health` (`down`/`degraded`) |
