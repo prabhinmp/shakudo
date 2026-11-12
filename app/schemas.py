@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, computed_field, field_validator, model_validator
 
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY_VALUE = "deploy-api"
@@ -38,7 +38,7 @@ def cpu_to_milli(value: str) -> int:
 
 
 def mem_to_bytes(value: str) -> int:
-    m = MEM_RE.match(value)
+    m = MEM_RE.fullmatch(value)
     return int(float(m.group(1)) * _MEM_UNITS[m.group(2)])
 
 
@@ -53,7 +53,7 @@ class Quantities(Strict):
     @field_validator("cpu")
     @classmethod
     def _cpu(cls, v: str) -> str:
-        if not CPU_RE.match(v) or cpu_to_milli(v) <= 0:
+        if not CPU_RE.fullmatch(v) or cpu_to_milli(v) <= 0:
             raise ValueError("cpu must be a positive quantity like '250m' or '0.5'")
         if cpu_to_milli(v) > MAX_CPU_MILLI:
             raise ValueError(f"cpu may not exceed {MAX_CPU_MILLI}m")
@@ -62,7 +62,7 @@ class Quantities(Strict):
     @field_validator("memory")
     @classmethod
     def _mem(cls, v: str) -> str:
-        if not MEM_RE.match(v) or mem_to_bytes(v) <= 0:
+        if not MEM_RE.fullmatch(v) or mem_to_bytes(v) <= 0:
             raise ValueError("memory must be a positive quantity like '128Mi' or '1Gi'")
         if mem_to_bytes(v) > MAX_MEM_BYTES:
             raise ValueError("memory may not exceed 8Gi")
@@ -89,13 +89,13 @@ class EnvVar(Strict):
     @field_validator("name")
     @classmethod
     def _name(cls, v: str) -> str:
-        if not ENV_NAME_RE.match(v):
+        if not ENV_NAME_RE.fullmatch(v):
             raise ValueError("env name must match [A-Za-z_][A-Za-z0-9_]*")
         return v
 
 
 def _check_image(v: str) -> str:
-    if len(v) > 255 or not IMAGE_RE.match(v):
+    if len(v) > 255 or not IMAGE_RE.fullmatch(v):
         raise ValueError("image is not a valid container image reference")
     return v
 
@@ -104,8 +104,8 @@ class DeploymentCreate(Strict):
     name: str = Field(min_length=1, max_length=63, pattern=DNS_LABEL_RE)
     namespace: str = Field(min_length=1, max_length=63, pattern=DNS_LABEL_RE)
     image: str
-    replicas: int = Field(default=1, ge=0)
-    port: int = Field(ge=1, le=65535)
+    replicas: StrictInt = Field(default=1, ge=0)   # strict: "3", 2.0 and true are rejected, not coerced
+    port: StrictInt = Field(ge=1, le=65535)
     resources: Resources
     env: list[EnvVar] = Field(default_factory=list, max_length=50)
     labels: dict[str, str] = Field(min_length=1, max_length=20)
@@ -126,9 +126,9 @@ class DeploymentCreate(Strict):
     @classmethod
     def _labels(cls, v: dict[str, str]) -> dict[str, str]:
         for key, val in v.items():
-            if len(key) > 253 or not LABEL_KEY_RE.match(key) or len(key.split("/")[-1]) > 63:
+            if len(key) > 253 or not LABEL_KEY_RE.fullmatch(key) or len(key.split("/")[-1]) > 63:
                 raise ValueError(f"invalid label key '{key}'")
-            if len(val) > 63 or not LABEL_VALUE_RE.match(val):
+            if len(val) > 63 or not LABEL_VALUE_RE.fullmatch(val):
                 raise ValueError(f"invalid label value for '{key}'")
             if key in RESERVED_LABELS:
                 raise ValueError(f"label '{key}' is reserved")
@@ -136,7 +136,7 @@ class DeploymentCreate(Strict):
 
 
 class DeploymentPatch(Strict):
-    replicas: int | None = Field(default=None, ge=0)
+    replicas: StrictInt | None = Field(default=None, ge=0)
     image: str | None = None
 
     @field_validator("image")

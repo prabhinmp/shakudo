@@ -16,6 +16,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 log = logging.getLogger("app.errors")
 
@@ -104,6 +105,14 @@ def register_error_handlers(app: FastAPI) -> None:
             for e in exc.errors()
         ]
         return JSONResponse(_body("invalid_input", "Request validation failed", details), status_code=400)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(_: Request, exc: StarletteHTTPException):
+        # Framework-level errors (unparseable body, unknown route, wrong method) use OUR error shape too.
+        code = {400: "invalid_input", 404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
+        message = "Malformed request body" if exc.status_code == 400 else (
+            exc.detail if isinstance(exc.detail, str) else "Request failed")
+        return JSONResponse(_body(code, message), status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
     @app.exception_handler(Exception)
     async def unhandled(_: Request, exc: Exception):
