@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deploy-api.fullname" . }}
+  labels: {{- include "deploy-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {{- include "deploy-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "deploy-api.selectorLabels" . | nindent 8 }}
+      annotations:
+        # restart pods if the generated config changes
+        checksum/config: {{ toJson .Values.config | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "deploy-api.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "deploy-api.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - name: DEPLOY_API_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deploy-api.secretName" . }}
+                  key: {{ .Values.jwt.secretKey }}
+            - {name: DEPLOY_API_JWT_ISSUER, value: {{ .Values.jwt.issuer | quote }}}
+            - {name: DEPLOY_API_JWT_AUDIENCE, value: {{ .Values.jwt.audience | quote }}}
+            - {name: DEPLOY_API_ALLOWED_REGISTRIES, value: {{ .Values.config.allowedRegistries | toJson | quote }}}
+            - {name: DEPLOY_API_DENIED_NAMESPACES, value: {{ .Values.config.deniedNamespaces | toJson | quote }}}
+            - {name: DEPLOY_API_MAX_REPLICAS, value: {{ .Values.config.maxReplicas | quote }}}
+            - {name: DEPLOY_API_RATE_LIMIT_READ_PER_MIN, value: {{ .Values.config.rateLimitReadPerMin | quote }}}
+            - {name: DEPLOY_API_RATE_LIMIT_WRITE_PER_MIN, value: {{ .Values.config.rateLimitWritePerMin | quote }}}
+            - {name: DEPLOY_API_RATE_LIMIT_AUTH_FAIL_PER_MIN, value: {{ .Values.config.rateLimitAuthFailPerMin | quote }}}
+            - {name: DEPLOY_API_POD_READ_ONLY_ROOT_FS, value: {{ .Values.config.podReadOnlyRootFs | quote }}}
+            - {name: DEPLOY_API_LOG_LEVEL, value: {{ .Values.config.logLevel | quote }}}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3      # tolerate short stalls on a busy node; a restart is the last resort
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 3
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 16Mi}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}

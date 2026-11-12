@@ -1,0 +1,7 @@
+deploy-api installed in namespace {{ .Release.Namespace }}.
+
+Reach it locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "deploy-api.fullname" . }} 8080:{{ .Values.service.port }}
+
+Signing secret (needed to mint test tokens; see docs/API_TESTING.md):
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "deploy-api.secretName" . }} -o jsonpath='{.data.{{ .Values.jwt.secretKey }}}' | base64 -d

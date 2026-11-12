@@ -1,0 +1,32 @@
+# Least privilege: only the verbs/resources the API needs. No secrets, no configmaps,
+# no nodes, no cluster-admin. NOTE: RBAC can only grant, not deny, so these permissions are
+# cluster-wide; the application's protected-namespace guard is what keeps kube-system etc. safe.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "deploy-api.fullname" . }}
+  labels: {{- include "deploy-api.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "deploy-api.fullname" . }}
+  labels: {{- include "deploy-api.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "deploy-api.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "deploy-api.fullname" . }}
+    namespace: {{ .Release.Namespace }}

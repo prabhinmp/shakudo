@@ -1,0 +1,64 @@
+replicaCount: 2
+
+image:
+  repository: deploy-api
+  tag: dev
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# --- Application config (maps to DEPLOY_API_* env vars) ---
+config:
+  allowedRegistries: ["docker.io", "ghcr.io"]
+  deniedNamespaces: ["kube-system", "kube-public", "kube-node-lease", "default"]  # extra to the hard-coded set
+  maxReplicas: 20
+  rateLimitReadPerMin: 120
+  rateLimitWritePerMin: 30
+  rateLimitAuthFailPerMin: 10
+  podReadOnlyRootFs: true
+  logLevel: INFO
+
+# --- JWT signing secret ---
+# Option A (recommended for real use): create the Secret yourself and name it here.
+#   kubectl -n <ns> create secret generic my-jwt --from-literal=jwt-secret="$(openssl rand -base64 48)"
+# Option B (default): the chart generates a random secret once and keeps it across upgrades.
+jwt:
+  existingSecret: ""
+  secretKey: jwt-secret
+  issuer: deploy-api
+  audience: deploy-api
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Optional ingress (disabled by default). TLS should terminate here in real clusters.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: deploy-api.example.com
+  tlsSecretName: ""
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: 500m, memory: 256Mi}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Restrict who may reach the API and where it may connect.
+networkPolicy:
+  enabled: true
+  # Pods/namespaces allowed to call the API. Default: same namespace only.
+  ingressFrom:
+    - podSelector: {}
+  # Egress to the kube-apiserver. NetworkPolicy sees the REAL endpoint (after service DNAT), whose
+  # port differs per distribution: EKS/GKE 443, kubeadm 6443, minikube 8443. Find yours with:
+  #   kubectl get endpointslices -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[0].ports[0].port}'
+  apiServerPorts: [443, 6443, 8443]
+  # Strongly recommended in production: pin egress to the API server address, e.g. "192.168.49.2/32".
+  apiServerCidr: ""
+
+nodeSelector: {}
+tolerations: []

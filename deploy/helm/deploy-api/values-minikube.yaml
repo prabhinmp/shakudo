@@ -1,0 +1,11 @@
+# Local minikube overrides:  helm upgrade --install deploy-api deploy/helm/deploy-api -n deploy-api -f deploy/helm/deploy-api/values-minikube.yaml
+ingress:
+  enabled: true
+  className: nginx
+  host: deploy-api.localtest.me      # public DNS name that resolves to 127.0.0.1 (no /etc/hosts edit)
+networkPolicy:
+  ingressFrom:
+    - podSelector: {}                # same namespace
+    - namespaceSelector:             # the ingress controller
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
