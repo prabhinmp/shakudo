@@ -93,5 +93,5 @@ def test_protected_namespaces_blocked_on_every_endpoint_even_with_empty_denylist
     h = {"Authorization": f"Bearer {make_token(namespaces=['*'])}"}
     valid_body["namespace"] = ns
     assert c.post("/api/deployments", json=valid_body, headers=h).status_code == 403
-    assert c.get(f"/api/deployments?namespace={ns}", headers=h).status_code == 403
+    assert c.get(f"/api/deployments?namespace={ns}", headers=h).status_code == 200  # reads are allowed (read-only view)
     assert kube.namespaces == set() and kube.items == {}

@@ -34,6 +34,12 @@ def test_built_in_namespaces_get_a_message_that_says_protected_even_with_a_wildc
     assert kube.namespaces == set() and kube.calls == []
 
 
+@pytest.mark.parametrize("ns", PROTECTED)
+def test_protected_namespaces_can_be_listed_read_only(client, auth, ns):
+    r = client.get(f"/api/deployments?namespace={ns}", headers=auth(namespaces=["*"]))
+    assert r.status_code == 200
+
+
 def test_list_filter_outside_allowlist_explains_the_token(client, auth):
     r = client.get("/api/deployments?namespace=team-z", headers=auth(namespaces=["team-a"]))
     assert r.status_code == 403 and "team-a" in r.json()["error"]["message"]

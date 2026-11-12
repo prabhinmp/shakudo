@@ -103,6 +103,18 @@ def namespace_allowed(principal: Principal, namespace: str, settings: Settings) 
     return any(fnmatchcase(namespace, pattern) for pattern in principal.namespaces)
 
 
+def namespace_readable(principal: Principal, namespace: str) -> bool:
+    """READ access: only the token's namespace list matters. Built-in namespaces (default, kube-*)
+    are visible read-only; writes still go through namespace_allowed, which refuses them."""
+    return any(fnmatchcase(namespace, pattern) for pattern in principal.namespaces)
+
+
+def authorize_namespace_read(principal: Principal, namespace: str) -> None:
+    if not namespace_readable(principal, namespace):
+        raise ForbiddenError(
+            f"Namespace '{namespace}' is not in this token's allowed namespaces ({', '.join(principal.namespaces) or 'none'})")
+
+
 def authorize_namespace(principal: Principal, namespace: str, settings: Settings) -> None:
     # Two different reasons, so say which one: a built-in namespace can never be used by anyone,
     # whereas a namespace outside the token's list just needs a token that includes it.

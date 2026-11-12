@@ -207,6 +207,10 @@ class DeploymentSummary(BaseModel):
     labels: dict[str, str]
     replicas: Replicas
     created_at: datetime | None = None
+    # managed: created by this API. read_only: visible but never modifiable (built-in/protected
+    # namespace, or a deployment this API did not create). The UI disables scale/restart/delete on it.
+    managed: bool = True
+    read_only: bool = False
 
     @computed_field
     @property

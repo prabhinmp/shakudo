@@ -3,8 +3,10 @@
 Routes call these methods; they never touch the kubernetes client directly. Tests swap
 this class for an in-memory fake (tests/fakes.py) that has the same methods.
 
-Every deployment we create carries the label  app.kubernetes.io/managed-by=deploy-api
-and every query filters on it, so the API can only ever see/modify what it created.
+Every deployment we create carries the label  app.kubernetes.io/managed-by=deploy-api.
+READS cover the whole cluster (so the dashboard shows built-in namespaces and foreign deployments);
+each item is flagged managed/read_only, and MUTATIONS are only allowed on managed deployments in
+non-protected namespaces.
 """
 import functools
 import json
@@ -94,15 +96,17 @@ def build_manifest(spec: DeploymentCreate, settings: Settings) -> dict:
     }
 
 
-def to_summary(d) -> DeploymentSummary:
+def to_summary(d, denied=()) -> DeploymentSummary:
     s = d.status
+    labels = d.metadata.labels or {}
+    managed = labels.get(MANAGED_BY_LABEL) == MANAGED_BY_VALUE
     desired = d.spec.replicas if d.spec.replicas is not None else 0
     return DeploymentSummary(
         id=d.metadata.uid,
         name=d.metadata.name,
         namespace=d.metadata.namespace,
         image=d.spec.template.spec.containers[0].image,
-        labels=d.metadata.labels or {},
+        labels=labels,
         replicas=Replicas(
             desired=desired,
             ready=(s.ready_replicas or 0) if s else 0,
@@ -110,6 +114,8 @@ def to_summary(d) -> DeploymentSummary:
             unavailable=(s.unavailable_replicas or 0) if s else 0,
         ),
         created_at=d.metadata.creation_timestamp,
+        managed=managed,
+        read_only=(not managed) or is_protected_namespace(d.metadata.namespace, denied),
     )
 
 
@@ -204,6 +210,9 @@ class KubernetesService:
         probe_cfg.retries = 0
         return cls(client.AppsV1Api(), client.CoreV1Api(), client.VersionApi(client.ApiClient(probe_cfg)), settings)
 
+    def _summary(self, d) -> DeploymentSummary:
+        return to_summary(d, self.settings.denied_namespaces)
+
     @property
     def _t(self) -> dict:
         return {"_request_timeout": self.timeout}
@@ -263,15 +272,20 @@ class KubernetesService:
             if e.status == 409:
                 raise ConflictError(f"Deployment '{spec.name}' already exists in namespace '{spec.namespace}'")
             raise
-        return to_summary(d)
+        return self._summary(d)
 
     @_guarded
     def list_deployments(self, namespace: str | None) -> list[DeploymentSummary]:
         if namespace:
-            items = self.apps.list_namespaced_deployment(namespace, label_selector=MANAGED_SELECTOR, **self._t).items
+            items = self.apps.list_namespaced_deployment(namespace, **self._t).items
         else:
-            items = self.apps.list_deployment_for_all_namespaces(label_selector=MANAGED_SELECTOR, **self._t).items
-        return [to_summary(d) for d in items]
+            items = self.apps.list_deployment_for_all_namespaces(**self._t).items
+        return [self._summary(d) for d in items]
+
+    @_guarded
+    def list_namespaces(self) -> list[str]:
+        """Every namespace in the cluster (read-only view; the UI filter lists them all)."""
+        return sorted(n.metadata.name for n in self.core.list_namespace(**self._t).items)
 
     @_guarded
     def locate(self, uid: str) -> DeploymentSummary:
@@ -291,7 +305,7 @@ class KubernetesService:
                       last_transition_time=c.last_transition_time)
             for c in (d.status.conditions or [])
         ]
-        return DeploymentDetail(**to_summary(d).model_dump(), pods=[to_pod_status(p) for p in pods], conditions=conditions)
+        return DeploymentDetail(**self._summary(d).model_dump(), pods=[to_pod_status(p) for p in pods], conditions=conditions)
 
     @_guarded
     @_mutating
@@ -302,14 +316,14 @@ class KubernetesService:
         if image is not None:
             # strategic merge patch merges the containers list by "name" (container name == deployment name)
             spec["template"] = {"spec": {"containers": [{"name": name, "image": image}]}}
-        return to_summary(self.apps.patch_namespaced_deployment(name, namespace, {"spec": spec}, **self._t))
+        return self._summary(self.apps.patch_namespaced_deployment(name, namespace, {"spec": spec}, **self._t))
 
     @_guarded
     @_mutating
     def restart_deployment(self, namespace: str, name: str) -> DeploymentSummary:
         stamp = datetime.now(timezone.utc).isoformat()
         body = {"spec": {"template": {"metadata": {"annotations": {RESTART_ANNOTATION: stamp}}}}}
-        return to_summary(self.apps.patch_namespaced_deployment(name, namespace, body, **self._t))
+        return self._summary(self.apps.patch_namespaced_deployment(name, namespace, body, **self._t))
 
     @_guarded
     @_mutating

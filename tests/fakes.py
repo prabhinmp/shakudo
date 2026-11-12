@@ -14,6 +14,7 @@ class FakeKube:
         self.calls: list[str] = []  # order of service calls, to prove pre-flight runs first
         self.foreign: set[tuple[str, str]] = set()  # (namespace, name) deployments NOT created by this API
         self.terminating: set[str] = set()
+        self.cluster_namespaces: set[str] = {"default", "kube-system", "kube-public", "kube-node-lease"}  # built-ins always exist
         self.reads = 0  # counts live reads, to prove GETs are never served from a cache
 
     def _maybe_fail(self):
@@ -54,6 +55,21 @@ class FakeKube:
         self.reads += 1
         self._maybe_fail()
         return [d for d in self.items.values() if namespace is None or d.namespace == namespace]
+
+    def list_namespaces(self):
+        self.reads += 1
+        self._maybe_fail()
+        return sorted(self.cluster_namespaces | self.namespaces)
+
+    def add_foreign(self, name, namespace, replicas=1, managed=False):
+        """A deployment this API did not create (e.g. coredns in kube-system) - visible but read-only."""
+        from app.config import is_protected_namespace
+        d = DeploymentSummary(
+            id=str(uuid.uuid4()), name=name, namespace=namespace, image="busybox", labels={},
+            replicas=Replicas(desired=replicas, ready=replicas, available=replicas, unavailable=0),
+            managed=managed, read_only=(not managed) or is_protected_namespace(namespace))
+        self.items[d.id] = d
+        return d
 
     def locate(self, uid):
         self.reads += 1

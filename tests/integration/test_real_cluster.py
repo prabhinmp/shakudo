@@ -144,8 +144,12 @@ def test_deployment_made_outside_the_api_is_rejected_and_untouched(api, raw, ns)
     assert r.status_code == 409 and "already exists" in r.json()["error"]["message"]
     untouched = apps.read_namespaced_deployment("foreign", ns)
     assert "app.kubernetes.io/managed-by" not in (untouched.metadata.labels or {})
-    names = [d["name"] for d in api.get(f"/api/deployments?namespace={ns}", headers=tok("viewer")).json()]
-    assert "foreign" not in names                       # API never exposes what it did not create
+    items = {d["name"]: d for d in api.get(f"/api/deployments?namespace={ns}", headers=tok("viewer")).json()}
+    assert items["foreign"]["read_only"] is True and items["foreign"]["managed"] is False   # visible, flagged read-only
+    fid = items["foreign"]["id"]
+    assert api.patch(f"/api/deployments/{fid}", json={"replicas": 5}, headers=tok("operator")).status_code == 403
+    assert api.delete(f"/api/deployments/{fid}", headers=tok()).status_code == 403
+    assert apps.read_namespaced_deployment("foreign", ns).spec.replicas == (untouched.spec.replicas)  # never modified
 
 
 @pytest.mark.parametrize("protected", PROTECTED)
@@ -155,6 +159,10 @@ def test_protected_namespaces_are_never_modified_in_the_real_cluster(api, raw, p
     before, ns_rv = snap(), core.read_namespace(protected).metadata.resource_version
     god = tok(ns_allow=("*",), sub="god")
     assert api.post("/api/deployments", json=body(protected, name="evil"), headers=god).status_code == 403
-    assert api.get(f"/api/deployments?namespace={protected}", headers=god).status_code == 403
+    listed = api.get(f"/api/deployments?namespace={protected}", headers=god)
+    assert listed.status_code == 200 and all(d["read_only"] for d in listed.json())   # visible, never writable
+    for d in listed.json():
+        assert api.patch(f"/api/deployments/{d['id']}", json={"replicas": 9}, headers=tok("operator", ns_allow=("*",))).status_code == 403
+        assert api.delete(f"/api/deployments/{d['id']}", headers=god).status_code == 403
     assert snap() == before
     assert core.read_namespace(protected).metadata.resource_version == ns_rv

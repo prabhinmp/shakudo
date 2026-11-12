@@ -10,11 +10,12 @@ from app.core.audit import audit
 from app.core.security import (
     Principal,
     authorize_namespace,
+    authorize_namespace_read,
     get_settings_dep,
-    namespace_allowed,
+    namespace_readable,
     require_role,
 )
-from app.errors import NotFoundError
+from app.errors import ForbiddenError, NotFoundError
 from app.schemas import (
     DNS_LABEL_RE,
     UUID_RE,
@@ -39,9 +40,19 @@ def _visible(uid: str, principal: Principal, settings: Settings, kube) -> Deploy
     """Find a deployment by id. If the caller may not access its namespace, answer 404
     (not 403) so callers can't probe for the existence of deployments they can't see."""
     found = kube.locate(uid)
-    if not namespace_allowed(principal, found.namespace, settings):
+    if not namespace_readable(principal, found.namespace):
         audit(principal, "access-denied", found.namespace, uid, outcome="hidden-as-404")
         raise NotFoundError(f"Deployment '{uid}' not found")
+    return found
+
+
+def _writable(found: DeploymentSummary) -> DeploymentSummary:
+    """Reads are cluster-wide, writes are not: built-in namespaces and deployments this API did not
+    create are shown but never changed."""
+    if found.read_only:
+        why = "is in a protected built-in namespace" if found.namespace.startswith("kube-") or found.namespace == "default" \
+            else "was not created by this API"
+        raise ForbiddenError(f"Deployment '{found.name}' is read-only: it {why}")
     return found
 
 
@@ -70,10 +81,10 @@ def list_deployments(
     kube=Depends(get_kube),
 ):
     if namespace:
-        authorize_namespace(principal, namespace, settings)
+        authorize_namespace_read(principal, namespace)
         return kube.list_deployments(namespace)
     # No filter: return only what this caller is allowed to see.
-    return [d for d in kube.list_deployments(None) if namespace_allowed(principal, d.namespace, settings)]
+    return [d for d in kube.list_deployments(None) if namespace_readable(principal, d.namespace)]
 
 
 @namespaces_router.get("", response_model=NamespaceList)
@@ -82,9 +93,8 @@ def list_namespaces(
     settings: Settings = Depends(get_settings_dep),
     kube=Depends(get_kube),
 ):
-    """Namespaces that hold managed deployments AND that this caller may see (for the UI filter)."""
-    found = {d.namespace for d in kube.list_deployments(None) if namespace_allowed(principal, d.namespace, settings)}
-    return NamespaceList(namespaces=sorted(found))
+    """Every cluster namespace this caller may see (for the UI filter), including built-in ones."""
+    return NamespaceList(namespaces=sorted(n for n in kube.list_namespaces() if namespace_readable(principal, n)))
 
 
 @router.get("/{id}", response_model=DeploymentDetail)
@@ -110,7 +120,7 @@ def patch_deployment(
         policy.check_image_allowed(body.image, settings)
     if body.replicas is not None:
         policy.check_replicas(body.replicas, settings)
-    found = _visible(id, principal, settings, kube)
+    found = _writable(_visible(id, principal, settings, kube))
     updated = kube.patch_deployment(found.namespace, found.name, body.replicas, body.image)
     audit(principal, "patch", found.namespace, id)
     return updated
@@ -123,7 +133,7 @@ def restart_deployment(
     settings: Settings = Depends(get_settings_dep),
     kube=Depends(get_kube),
 ):
-    found = _visible(id, principal, settings, kube)
+    found = _writable(_visible(id, principal, settings, kube))
     result = kube.restart_deployment(found.namespace, found.name)
     audit(principal, "restart", found.namespace, id)
     return result
@@ -136,7 +146,7 @@ def delete_deployment(
     settings: Settings = Depends(get_settings_dep),
     kube=Depends(get_kube),
 ):
-    found = _visible(id, principal, settings, kube)
+    found = _writable(_visible(id, principal, settings, kube))
     kube.delete_deployment(found.namespace, found.name, id)
     audit(principal, "delete", found.namespace, id)
     return Response(status_code=204)
