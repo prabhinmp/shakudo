@@ -6,14 +6,15 @@
 #   ./scripts/ci.sh --watch         re-run whenever source files change (continuous)
 #   ./scripts/ci.sh --deploy        also helm-upgrade the local minikube cluster
 #   REGISTRY=docker.io/me ./scripts/ci.sh --push   also tag + push the IMAGE (only after everything passed)
+#   ./scripts/ci.sh --integration   also run the NO-MOCK suite against the real cluster in your kube context
 #   ./scripts/ci.sh --commit        after a fully GREEN run, commit any changes to git (never on a red run)
 #   ./scripts/ci.sh --git-push      with --commit: also `git push` the branch to origin
 #   Periodic commits:  ./scripts/ci.sh --watch --commit [--git-push]   (one commit per green change)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-WATCH=0; DEPLOY=0; PUSH=0; COMMIT=0; GITPUSH=0
-for a in "$@"; do case $a in --watch) WATCH=1;; --deploy) DEPLOY=1;; --push) PUSH=1;; --commit) COMMIT=1;; --git-push) GITPUSH=1; COMMIT=1;;
+WATCH=0; DEPLOY=0; PUSH=0; COMMIT=0; GITPUSH=0; INTEGRATION=0
+for a in "$@"; do case $a in --watch) WATCH=1;; --deploy) DEPLOY=1;; --push) PUSH=1;; --commit) COMMIT=1;; --integration) INTEGRATION=1;; --git-push) GITPUSH=1; COMMIT=1;;
   *) echo "unknown option $a"; exit 2;; esac; done
 
 IMAGE=deploy-api
@@ -29,11 +30,23 @@ fingerprint() { # hash of file names + contents, ignoring caches
 }
 
 auto_commit() { # $1 = image tag. Only ever called after every stage passed.
-  git add -A                                   # .gitignore keeps .venv, .env, caches out
+  # Stage ONLY known project paths (never `git add -A`): other folders in the repo (e.g. ui/) may be
+  # someone else's work in progress and must not be swept into a CI commit.
+  local paths=() p   # only paths that exist: `git add` aborts the WHOLE add if one pathspec is missing
+  for p in app tests deploy scripts docs README.md Dockerfile .dockerignore .gitignore \
+           requirements.txt requirements-dev.txt pytest.ini; do [ -e "$p" ] && paths+=("$p"); done
+  git add -A -- "${paths[@]}" || { red "git: could not stage files"; return 1; }
   if git diff --cached --quiet; then echo "git: nothing to commit"; return 0; fi
-  # Safety net: never commit anything that looks like a key or a JWT.
+  # Guard 1: dependency/build output must never be committed.
+  if git diff --cached --name-only | grep -qE '(^|/)(node_modules|dist|build|\.venv|__pycache__)/'; then
+    git reset -q; red "git: staged files include node_modules/dist/build/.venv. NOT committing."; return 1
+  fi
+  # Guard 2: an unusually large change is a sign something is wrong.
+  local n; n=$(git diff --cached --name-only | wc -l | tr -d ' ')
+  if [ "$n" -gt 100 ]; then git reset -q; red "git: $n files staged (limit 100). NOT committing."; return 1; fi
+  # Guard 3: never commit anything that looks like a key or a JWT.
   if git diff --cached -U0 | grep -qE 'BEGIN (RSA|EC|OPENSSH) PRIVATE|AKIA[0-9A-Z]{16}|eyJhbGciOi[A-Za-z0-9_-]{20,}\.eyJ'; then
-    git reset -q; red "git: possible secret in staged changes. NOT committing (changes left unstaged)."; return 1
+    git reset -q; red "git: possible secret in staged changes. NOT committing."; return 1
   fi
   local stat; stat=$(git diff --cached --shortstat | sed 's/^ //')
   git commit -q -m "ci: green build $1" -m "$stat" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" \
@@ -49,6 +62,11 @@ pipeline() {
 
   stage "1/6 unit + API tests"
   $PY -m pytest -q -p no:warnings || { red "FAILED: tests. Nothing was built."; return 1; }
+
+  if [ $INTEGRATION = 1 ]; then
+    stage "1b/6 integration tests (REAL cluster, no mocks)"
+    $PY -m pytest -m integration -q -p no:warnings || { red "FAILED: integration tests. Nothing was built."; return 1; }
+  fi
 
   stage "2/6 dependency vulnerability scan"
   .venv/bin/pip-audit -r requirements.txt || { red "FAILED: vulnerable dependencies"; return 1; }

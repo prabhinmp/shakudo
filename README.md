@@ -61,6 +61,9 @@ Then follow **[docs/API_TESTING.md](docs/API_TESTING.md)** to exercise every end
 .venv/bin/python -m pytest -q          # 132 tests, uses an in-memory fake cluster, no Kubernetes needed
 ./scripts/ci.sh                        # full pipeline once
 ./scripts/ci.sh --watch                # continuous: re-runs on every file change; tests gate the build
+./scripts/ci.sh --integration          # also run the NO-MOCK suite against the real cluster in your kube context
+./scripts/ci.sh --watch --commit       # periodic commits: one commit after every GREEN build, never on red
+.venv/bin/python -m pytest -m integration   # real-cluster tests only (creates/deletes its own demo-it-* namespace)
 ```
 
 CI stops at the first failing stage, so an image is only built after all tests pass.

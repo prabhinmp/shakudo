@@ -3,7 +3,7 @@
 Python (FastAPI) service that creates and manages Kubernetes Deployments through a secured REST API.
 Legend: ✅ built and verified · 🟡 built, partly verified · ⬜ not started · ⏸ blocked on a decision
 
-_Last updated: 2026-11-12. Tests: **132 passing**. Verified live on minikube through the ingress._
+_Last updated: 2026-11-12. Tests: **132 unit + 7 real-cluster integration (no mocks), all passing**. Verified live on minikube through the ingress (local port 18080)._
 
 ## 1. Progress at a glance
 
@@ -24,7 +24,8 @@ _Last updated: 2026-11-12. Tests: **132 passing**. Verified live on minikube thr
 | 10 | Local CI script (`--watch`, tests gate the build) | ✅ |
 | 11 | README, curl test guide, this catalog | ✅ |
 | 12 | **Push image to a registry** | ⏸ waiting for your choice of registry (see §7) |
-| 13 | Git commit | ⬜ nothing committed yet |
+| 13 | Git: 6 local commits + auto-commit on green builds (`ci.sh --commit`) | 🟡 committed locally; **push to GitHub blocked, see §7** |
+| 13b | No-mock proof: production code/image audited; real-cluster integration suite | ✅ |
 | 14 | Production hardening (TLS, shared rate limits, OIDC, multi-arch, image scan) | ⬜ see §7 |
 
 ## 2. Features
@@ -107,6 +108,7 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 | TLS on the ingress | ⬜ local ingress is plain HTTP |
 
 ## 6. Verification record
+- **No mock data in production:** `app/` contains no mock/fake/stub/sample data (only two comments mention that tests substitute a fake); nothing in `app/` imports from `tests/`; the Docker image contains only `/srv/app` (no tests, no fakes); every API value comes from a real Kubernetes client call. The unit tests do use an in-memory fake and `MagicMock` (test-only), which is why a separate **no-mock integration suite** exists: `tests/integration/` runs the real app and real service against the real cluster and cross-checks results with an independent raw Kubernetes client (create, duplicate, live reads, patch, restart, cascade delete, foreign deployment, protected namespaces). Run: `pytest -m integration` or `./scripts/ci.sh --integration`.
 - **132 tests:** security, API contract, validation, manifest hardening, error translation, protected namespaces, rate limiting, audit, live-state/pre-flight. Mutation-checked: deliberately removing the pre-flight call, the `no-store` header, or adding a cache each made the new tests fail.
 - **Live on minikube via ingress (`deploy-api.localtest.me:18080`):** every endpoint and every status code in the contract; foreign (kubectl-made) deployment rejected with 409 and left untouched; `kubectl scale` visible on the very next GET; `kubectl delete` gives immediate 404; `no-store` header present; cascade delete leaves no ReplicaSets/Pods; protected namespaces unchanged (state diffed); rate limit and audit lines observed.
 - **`docs/API_TESTING.md`:** every `bash` block was extracted and executed against the live ingress; the documented codes matched.
@@ -116,10 +118,10 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 ## 7. What is left
 
 ### Blocked on you
+0. **Push to GitHub.** The remote `origin` is set (`github.com/prabhinmp/shakudo`, currently empty) and 6 commits are ready, but the sandbox's permission system denied `git push`. Run `git push -u origin main` yourself, or add a Bash permission rule for `git push` and I will do it (and `ci.sh --commit --git-push` will then push after each green build).
 1. **Push the image to a registry.** Your Docker config holds credentials for both **Docker Hub** and **AWS ECR (801935342396.dkr.ecr.ap-south-1.amazonaws.com)**. Pushing publishes the image, so tell me which one and the repository name (e.g. `docker.io/<you>/deploy-api`, or the ECR repo). The CI already supports it: `REGISTRY=<repo> ./scripts/ci.sh --push`. If the target is an EKS cluster, I should also build **multi-arch (amd64+arm64)**: the current image is arm64-only (built on Apple silicon).
 
 ### Should do next
-2. **Git:** nothing is committed. Suggested: one initial commit, or one per step.
 3. **Real client IP behind the ingress:** the failed-auth lockout and audit logs currently see the ingress pod's IP (`10.244.0.x`), so one abusive client can lock out everyone for a minute. Fix: trust `X-Forwarded-For` only from the ingress.
 4. **Rate limits are per pod:** with 2 replicas the effective limit doubles (observed). Exact global limits need Redis.
 5. **TLS** on the ingress (cert-manager, or a self-signed cert for local).
