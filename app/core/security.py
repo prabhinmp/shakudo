@@ -104,5 +104,11 @@ def namespace_allowed(principal: Principal, namespace: str, settings: Settings) 
 
 
 def authorize_namespace(principal: Principal, namespace: str, settings: Settings) -> None:
+    # Two different reasons, so say which one: a built-in namespace can never be used by anyone,
+    # whereas a namespace outside the token's list just needs a token that includes it.
+    if is_namespace_denied(namespace, settings):
+        raise ForbiddenError(f"Namespace '{namespace}' is protected (built-in Kubernetes namespace) and cannot be used")
     if not namespace_allowed(principal, namespace, settings):
-        raise ForbiddenError(f"Access to namespace '{namespace}' is not allowed")
+        raise ForbiddenError(
+            f"Namespace '{namespace}' is not in this token's allowed namespaces ({', '.join(principal.namespaces) or 'none'}); "
+            "use a token whose 'namespaces' claim includes it, or '*' for all non-protected namespaces")

@@ -34,7 +34,7 @@ check(){ if [ "$2" = "$3" ]; then ok "$1  [$3]"; else bad "$1 (wanted '$3', got 
 
 ADMIN=$(./scripts/mint-token.sh admin '["demo-*"]');  OPER=$(./scripts/mint-token.sh operator '["demo-*"]')
 VIEW=$(./scripts/mint-token.sh viewer '["demo-*"]');  OTHER=$(JWT_SUB=mallory ./scripts/mint-token.sh admin '["team-z"]')
-GOD=$(JWT_SUB=god ./scripts/mint-token.sh admin '["*"]')
+GOD=$(JWT_SUB=god ./scripts/mint-token.sh admin '["*"]'); ANYTOK=$(JWT_SUB=admin-any ./scripts/mint-token.sh admin)
 H(){ echo "Authorization: Bearer $1"; }
 JSON="Content-Type: application/json"
 RES='"resources":{"requests":{"cpu":"50m","memory":"32Mi"},"limits":{"cpu":"100m","memory":"64Mi"}}'
@@ -62,6 +62,13 @@ POST 409 "deployment made OUTSIDE the API is rejected (live pre-flight)" "$(mk f
 check "foreign deployment untouched (no managed-by label)" "$(kubectl -n "$NS" get deploy foreign -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')" ""
 expect 200 "list excludes foreign deployment" "$BASE/api/deployments?namespace=$NS" -H "$(H "$VIEW")"; hasnt "foreign not listed" '"foreign"'
 kubectl -n "$NS" delete deployment foreign >/dev/null
+
+section "3b. any namespace: created if missing; refused with a clear reason otherwise"
+ANYNS=scopetest-ns; kubectl delete ns "$ANYNS" --wait=true >/dev/null 2>&1
+POST 403 "token limited to demo-* is refused for $ANYNS" "$(mk echo $ANYNS)"; has "message explains the token" "allowed namespaces"
+check "refused call created NO namespace" "$(kubectl get ns "$ANYNS" --no-headers 2>/dev/null | wc -l | tr -d ' ')" "0"
+POST 201 "token with '*' creates the deployment (and the namespace)" "$(mk echo $ANYNS)" "$ANYTOK"
+check "namespace was created by the API and labelled" "$(kubectl get ns "$ANYNS" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')" "deploy-api"
 
 section "4. invalid input -> 400"
 POST 400 "DNS-incompatible name"   '{"name":"Bad_Name","namespace":"'$NS'","image":"nginx:1","port":80,'"$RES"',"labels":{"a":"b"}}'
@@ -112,7 +119,7 @@ expect 403 "viewer cannot patch" -X PATCH "$BASE/api/deployments/$ID" -H "$(H "$
 expect 404 "other team: GET is 404, not 403 (no existence leak)" "$BASE/api/deployments/$ID" -H "$(H "$OTHER")"
 expect 404 "other team: DELETE is 404" -X DELETE "$BASE/api/deployments/$ID" -H "$(H "$OTHER")"
 before=$(kubectl get ns -o name | sort | shasum)        # snapshot BEFORE the protected-namespace attempts
-for P in kube-system kube-public kube-node-lease default; do POST 403 "protected namespace $P (even with '*' token)" "$(mk evil "$P")" "$GOD"; done
+for P in kube-system kube-public kube-node-lease default; do POST 403 "protected namespace $P (even with '*' token)" "$(mk evil "$P")" "$GOD"; has "message says it is protected" "protected (built-in"; done
 check "no namespace was created or removed by those attempts" "$(kubectl get ns -o name | sort | shasum)" "$before"
 
 section "10. newer endpoints (need an image built from commit c132076 or later)"
@@ -149,6 +156,6 @@ gone=0; for i in $(seq 1 45); do
 expect 404 "second delete" -X DELETE "$BASE/api/deployments/$ID" -H "$(H "$ADMIN")"
 check "ReplicaSets and Pods are gone (cascade)" "$(kubectl -n "$NS" get rs,pods --no-headers 2>/dev/null | wc -l | tr -d ' ')" "0"
 
-kubectl delete ns "$NS" --wait=false >/dev/null 2>&1
+kubectl delete ns "$NS" "$ANYNS" --wait=false >/dev/null 2>&1
 printf '\n'; [ $FAIL -eq 0 ] && green "ALL $PASS CHECKS PASSED" || red "$FAIL FAILED, $PASS passed"
 exit $([ $FAIL -eq 0 ] && echo 0 || echo 1)

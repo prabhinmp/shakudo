@@ -3,7 +3,7 @@
 Python (FastAPI) service that creates and manages Kubernetes Deployments through a secured REST API.
 Legend: ✅ built and verified · 🟡 built, partly verified · ⬜ not started · ⏸ blocked on a decision
 
-_Last updated: 2026-11-12. Tests: **304 unit + 7 real-cluster integration (no mocks) + 67 curl assertions, all passing**. Verified live on minikube through the ingress (local port 18080)._
+_Last updated: 2026-11-12. Tests: **304 unit + 7 real-cluster integration (no mocks) + 76 curl assertions, all passing**. Verified live on minikube through the ingress (local port 18080)._
 
 ## 1. Progress at a glance
 
@@ -109,6 +109,7 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 | TLS on the ingress | ⬜ local ingress is plain HTTP |
 
 ## 6. Verification record
+- **Namespace scope (user question: why 403 on `testuser-api`):** the token's `namespaces` claim, not namespace creation, was the cause. A `["demo-*"]` token is refused (and creates nothing); a `["*"]` token creates the missing namespace itself (labelled `managed-by=deploy-api`); the four built-in namespaces are refused for every token. The 403 now says which reason applies. `mint-token.sh` defaults to `["*"]`. Tests: `tests/test_namespace_scope.py`; curl checks in `scripts/api-test.sh` section 3b.
 - **Validation hardening (found by edge-case tests):** `replicas`/`port` accepted `"3"`, `2.0` and `true` (coerced); trailing newline passed the image/label/env/quantity regexes (`.match` + `$`); framework errors (unparseable body, unknown route, wrong method) used FastAPI's `{"detail"}` shape. Fixed with `StrictInt`, `fullmatch`, and a handler that uses the standard error shape. Each fix was mutation-checked.
 - **Known behaviour:** after `DELETE` returns 204 the deployment remains visible until its pods finish terminating (about 4-12 s here, longer on a loaded node); the API does not yet expose a "terminating" state.
 - **No mock data in production:** `app/` contains no mock/fake/stub/sample data (only two comments mention that tests substitute a fake); nothing in `app/` imports from `tests/`; the Docker image contains only `/srv/app` (no tests, no fakes); every API value comes from a real Kubernetes client call. The unit tests do use an in-memory fake and `MagicMock` (test-only), which is why a separate **no-mock integration suite** exists: `tests/integration/` runs the real app and real service against the real cluster and cross-checks results with an independent raw Kubernetes client (create, duplicate, live reads, patch, restart, cascade delete, foreign deployment, protected namespaces). Run: `pytest -m integration` or `./scripts/ci.sh --integration`.

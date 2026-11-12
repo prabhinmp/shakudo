@@ -4,7 +4,7 @@ Run every step **in the same terminal**, in order: later steps reuse variables f
 Blocks marked `bash` are runnable; blocks marked `sh` are for reading only.
 
 **Fastest path:** `./scripts/api-test.sh` runs every step below against the real cluster with PASS/FAIL assertions
-(67 checks; `--ratelimit` adds the slow rate-limit step; `BASE=... SECRET=...` points it at another server).
+(76 checks; `--ratelimit` adds the slow rate-limit step; `BASE=... SECRET=...` points it at another server).
 The rest of this page is the same flow step by step, so you can run and inspect each command yourself.
 
 Expected status codes are shown as `# → 201`. If a step gives something else, see Troubleshooting at the end.
@@ -45,11 +45,17 @@ export OPERATOR=$(JWT_SUB=operator-user ./scripts/mint-token.sh operator '["demo
 export VIEWER=$(JWT_SUB=viewer-user ./scripts/mint-token.sh viewer '["demo-*"]')
 export OTHER=$(JWT_SUB=mallory ./scripts/mint-token.sh admin '["team-z"]')   # admin, but a different namespace
 export GOD=$(JWT_SUB=god ./scripts/mint-token.sh admin '["*"]')              # admin for everything (still blocked from protected namespaces)
+export ADMIN_ANY=$(JWT_SUB=admin-any ./scripts/mint-token.sh admin)         # no 2nd argument = ["*"]: any namespace, created if missing
 
 # small helper: prints the body, then the HTTP status
 api() { curl -s -w "\n[HTTP %{http_code}]\n" "$@"; }
 echo "tokens ready"
 ```
+
+**Which namespaces a token may use is part of the token** (its `namespaces` claim). The `ADMIN`, `OPERATOR` and `VIEWER` tokens above
+only allow names starting with `demo-`; `ADMIN_ANY` allows every namespace except the protected built-in ones
+(`kube-system`, `kube-public`, `kube-node-lease`, `default`, `kube-*`). If a create or list returns
+`403 ... is not in this token's allowed namespaces`, mint a token whose claim includes that namespace (or `*`).
 
 | Role | May call |
 |---|---|
@@ -432,15 +438,24 @@ curl -s -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Cont
 }
 ```
 
-**403 namespace not allowed** (`?namespace=kube-system`, or any namespace outside the token's list):
-
-**Expected: `403 Forbidden`**
+**403 namespace not in the token's list** (the message names the token's allowed namespaces and the fix):
 
 ```json
 {
   "error": {
     "code": "forbidden",
-    "message": "Access to namespace 'kube-system' is not allowed"
+    "message": "Namespace 'testuser-api' is not in this token's allowed namespaces (demo-*); use a token whose 'namespaces' claim includes it, or '*' for all non-protected namespaces"
+  }
+}
+```
+
+**403 protected namespace** (`kube-system`, `kube-public`, `kube-node-lease`, `default`, `kube-*`: refused for every token, even `*`):
+
+```json
+{
+  "error": {
+    "code": "forbidden",
+    "message": "Namespace 'kube-system' is protected (built-in Kubernetes namespace) and cannot be used"
   }
 }
 ```
@@ -530,6 +545,19 @@ api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-
 kubectl -n demo-api get deploy foreign -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'                          # untouched
 api -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=demo-api"       # → 200, lists only "echo": the API never exposes what it does not manage
 kubectl -n demo-api delete deployment foreign
+```
+
+### Any namespace: created automatically when it does not exist
+The API creates a missing namespace itself (labelled `managed-by=deploy-api`), as long as the token allows it and it is not a built-in one.
+
+```bash
+ANYNS=scope-demo
+echo "-- token limited to demo-* is refused, and NO namespace is created"
+api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d "$(echo "$CREATE_BODY" | sed "s/demo-api/$ANYNS/")"     # → 403 "not in this token's allowed namespaces"
+kubectl get namespace $ANYNS 2>&1 | tail -1                                                                                                                # → NotFound
+echo "-- token with '*': namespace is created together with the deployment"
+api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN_ANY" -H "Content-Type: application/json" -d "$(echo "$CREATE_BODY" | sed "s/demo-api/$ANYNS/")"  # → 201
+kubectl get namespace $ANYNS --show-labels                                                                                                                  # → Active, app.kubernetes.io/managed-by=deploy-api
 ```
 
 ## 5. Invalid input → 400
@@ -667,7 +695,7 @@ Even a token allowed for `*` can never touch `kube-system`, `kube-public`, `kube
 for NS in kube-system kube-public kube-node-lease default; do
   echo "-- create in $NS"
   api -X POST $BASE/api/deployments -H "Authorization: Bearer $GOD" -H "Content-Type: application/json" \
-    -d '{"name":"evil","namespace":"'$NS'","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'    # → 403
+    -d '{"name":"evil","namespace":"'$NS'","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'    # → 403 "... is protected (built-in Kubernetes namespace) and cannot be used"
 done
 ```
 
@@ -709,7 +737,7 @@ kubectl -n deploy-api logs deploy/deploy-api-deploy-api --tail=400 | grep '"audi
 ## 14. Clean up
 
 ```bash
-kubectl delete namespace demo-api --wait=false
+kubectl delete namespace demo-api scope-demo --wait=false
 echo "done. Stop the port-forward terminal with Ctrl-C."
 ```
 
@@ -720,6 +748,8 @@ echo "done. Stop the port-forward terminal with Ctrl-C."
 | `curl: Could not resolve host` | offline: add `--resolve deploy-api.localtest.me:18080:127.0.0.1` or use `-H "Host: deploy-api.localtest.me" http://127.0.0.1:18080` |
 | `Connection refused` on :18080 | the port-forward terminal is not running (step 0) |
 | `404 nginx` page | wrong Host header; the ingress only routes `deploy-api.localtest.me` |
+| 403 `... is not in this token's allowed namespaces (demo-*)` | the token's `namespaces` claim does not include that namespace. Mint one that does, or `./scripts/mint-token.sh admin` (defaults to `["*"]`). The API creates missing namespaces itself |
+| 403 `... is protected (built-in Kubernetes namespace)` | `kube-system`, `kube-public`, `kube-node-lease`, `default` and `kube-*` can never be used, by any token |
 | 401 on every call | secret mismatch: re-run step 1; or the token expired (default 1 h) |
 | 429 right after several 401s | repeated failed auth locks the caller's IP for 60 s. **Through the ingress all clients share the ingress pod's IP**, so wait a minute |
 | DELETE returned 204 but GET still shows the deployment | normal: foreground deletion waits for pods to terminate (up to ~30 s). Poll until 404 |

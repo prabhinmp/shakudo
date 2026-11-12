@@ -62,7 +62,7 @@ Versions are the ones **actually installed and used** when this document was wri
 |---|---|
 | pytest | 304 unit/API tests (in-memory fake cluster and mocked clients) + 7 integration tests |
 | Integration tests | `tests/integration/`: real app and real service against a real cluster, cross-checked with an independent raw Kubernetes client (no mocks) |
-| `scripts/api-test.sh` | 67 curl assertions against a running API on the real cluster |
+| `scripts/api-test.sh` | 76 curl assertions against a running API on the real cluster |
 | `scripts/ci.sh` | local CI: tests → pip-audit → helm lint → docker build → image checks → optional deploy/commit; `--watch` for continuous runs |
 | `scripts/mint-token.sh` | bash + openssl JWT generator for manual testing |
 
