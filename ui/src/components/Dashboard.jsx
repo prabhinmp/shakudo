@@ -91,7 +91,7 @@ export default function Dashboard({ api, session, onSignOut }) {
         {shown.map((d) => (
           <button key={d.id} className="glass card dep" data-testid="deployment-card" data-health={d.health} onClick={() => open(d.id)}>
             <div className="row"><strong className="name">{d.name}</strong><Badge health={d.health} /></div>
-            <div className="muted small">{d.namespace}</div>
+            <div className="muted small">{d.namespace}{d.read_only && <span className="tag" data-testid="readonly-tag" title="Visible only: scale, restart and delete are disabled"> · read-only</span>}</div>
             <div className="muted small ellipsis" title={d.image}>{d.image}</div>
             <div className="replicas" data-testid="card-replicas">{d.replicas.ready}/{d.replicas.desired} ready</div>
           </button>

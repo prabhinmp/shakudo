@@ -17,8 +17,10 @@ export default function DetailPanel({ id, api, session, onClose, onUnauthorized,
     onNotFound: () => { toast('That deployment no longer exists.', 'bad'); onClose() },
   })
   const d = detail.data
-  const canOperate = can(session.role, 'operator')
-  const canDelete = can(session.role, 'admin')
+  // read_only = built-in namespace (default, kube-*) or not created by this API: visible, never changeable.
+  const locked = Boolean(d?.read_only)
+  const canOperate = can(session.role, 'operator') && !locked
+  const canDelete = can(session.role, 'admin') && !locked
 
   const act = async (fn, okMessage) => {
     setBusy(true)
@@ -69,8 +71,13 @@ export default function DetailPanel({ id, api, session, onClose, onUnauthorized,
           </dl>
 
           <h3>Actions</h3>
-          {!canOperate && <p className="muted small">Your role ({session.role}) is read-only.</p>}
-          <form className="scale" onSubmit={scale}>
+          {locked && (
+            <p className="banner" data-testid="readonly-note" role="note">
+              Read-only: {d.managed ? 'this is in a built-in Kubernetes namespace' : 'it was not created by this API'}, so scale, restart and delete are disabled.
+            </p>
+          )}
+          {!locked && !can(session.role, 'operator') && <p className="muted small">Your role ({session.role}) is read-only.</p>}
+          <form className="scale" onSubmit={scale} noValidate>
             <label htmlFor="replicas">Replicas</label>
             <input id="replicas" type="number" min="0" max={MAX_REPLICAS} value={replicas}
               placeholder={String(d.replicas.desired)} onChange={(e) => setReplicas(e.target.value)} disabled={!canOperate || busy} />
@@ -80,7 +87,7 @@ export default function DetailPanel({ id, api, session, onClose, onUnauthorized,
           <div className="row actions">
             <button className="btn" disabled={!canOperate || busy} onClick={() => act(() => api.restart(id), 'Rolling restart started.')}>Restart</button>
             <button className="btn danger" disabled={!canDelete || busy} onClick={() => setConfirming(true)}
-              title={canDelete ? '' : 'Requires the admin role'}>Delete</button>
+              title={locked ? 'Read-only deployment' : canDelete ? '' : 'Requires the admin role'}>Delete</button>
           </div>
 
           <h3>Pods</h3>
