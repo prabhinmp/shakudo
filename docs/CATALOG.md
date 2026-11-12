@@ -1,0 +1,135 @@
+# Project Catalog and Progress Sheet: Deployment Manager API
+
+Python (FastAPI) service that creates and manages Kubernetes Deployments through a secured REST API.
+Legend: ✅ built and verified · 🟡 built, partly verified · ⬜ not started · ⏸ blocked on a decision
+
+_Last updated: 2026-11-12. Tests: **132 passing**. Verified live on minikube through the ingress._
+
+## 1. Progress at a glance
+
+| # | Step | Status |
+|---|---|---|
+| 0 | Environment check (Docker, minikube, Helm, kubectl) | ✅ |
+| 1 | Scaffold, config, health endpoints | ✅ |
+| 2 | Security core (JWT, roles, namespace policy) | ✅ |
+| 3 | Schemas and validation (all POST field rules) | ✅ |
+| 4 | Kubernetes service layer | ✅ |
+| 5 | All six endpoints + error contract | ✅ |
+| 6 | Rate limiting + audit of denied attempts | ✅ |
+| 6b | Protected namespaces (kube-system, kube-public, kube-node-lease, default) | ✅ |
+| 6c | Live reads (no cache, `no-store`) + POST pre-flight against the cluster | ✅ |
+| 7 | Dockerfile (multi-stage, non-root) built and checked | ✅ |
+| 8 | Helm chart (RBAC, NetworkPolicy, probes, PDB, ingress) | ✅ |
+| 9 | Deploy to minikube + end-to-end via ingress | ✅ |
+| 10 | Local CI script (`--watch`, tests gate the build) | ✅ |
+| 11 | README, curl test guide, this catalog | ✅ |
+| 12 | **Push image to a registry** | ⏸ waiting for your choice of registry (see §7) |
+| 13 | Git commit | ⬜ nothing committed yet |
+| 14 | Production hardening (TLS, shared rate limits, OIDC, multi-arch, image scan) | ⬜ see §7 |
+
+## 2. Features
+
+| # | Feature | Endpoint | Min. role | Status |
+|---|---|---|---|---|
+| F1 | Create deployment (namespace auto-created); pre-flight check against live cluster | `POST /api/deployments` | admin | ✅ unit + live |
+| F2 | List, optional `?namespace=`, always live | `GET /api/deployments` | viewer | ✅ unit + live |
+| F3 | Detail: replica counts, per-pod status, conditions, always live | `GET /api/deployments/{id}` | viewer | ✅ unit + live |
+| F4 | Scale replicas / change image (rolling update) | `PATCH /api/deployments/{id}` | operator | ✅ unit + live |
+| F5 | Rollout restart (annotation patch) | `POST /api/deployments/{id}/restart` | operator | ✅ unit + live |
+| F6 | Delete with foreground cascade (ReplicaSets, Pods) | `DELETE /api/deployments/{id}` | admin | ✅ unit + live |
+| F7 | Liveness / readiness | `GET /healthz`, `/readyz` | none | ✅ unit + live |
+
+`{id}` is the Deployment UID. POST rules: `name`, `namespace`, `image`, `port`, `resources` (requests+limits), `labels` are
+required; `replicas` (default 1), `env`, `command`, `args` optional; unknown fields rejected. See `app/schemas.py`.
+
+### Live-state guarantees
+- **GET is never cached.** No cache layer exists in the app; every list/detail reads the cluster at request time
+  (`locate` re-lists, `get_detail` re-reads deployment and pods). Every response carries `Cache-Control: no-store`.
+  A tripwire test fails the build if a cache is introduced.
+- **POST pre-flight** (read-only, runs before anything is created): rejects with 409 if the namespace is being deleted or if
+  **any** deployment with that name exists there, including ones not created by this API. A rejected request creates nothing,
+  not even a namespace. The cluster's own 409 on create remains as the backstop for races.
+
+## 3. Error contract
+Body: `{"error": {"code": "...", "message": "...", "details": [...]}}`
+
+| Status | When |
+|---|---|
+| 400 | invalid input: bad image, negative replicas, bad quantities, DNS-incompatible names, unknown fields, malformed id, disallowed registry |
+| 401 | missing / invalid / expired token |
+| 403 | role too low, or namespace not permitted |
+| 404 | id unknown **or not visible to the caller** (no existence leak) |
+| 409 | name exists in namespace (managed or not), or namespace terminating |
+| 413 | body larger than `max_body_bytes` |
+| 429 | rate limited, or IP cooling down after repeated failed auth (`Retry-After`) |
+| 500 | Kubernetes failure with the cluster's message; unexpected bugs return a generic message (details only in logs) |
+| 503 | `/readyz` only: Kubernetes unreachable |
+
+## 4. Components
+
+| Component | File | Responsibility |
+|---|---|---|
+| App factory | `app/main.py` | wiring, startup secret check, body-size limit, `no-store` headers |
+| Settings | `app/config.py` | env config (`DEPLOY_API_*`), hard-coded protected namespaces |
+| Errors | `app/errors.py` | error classes → HTTP codes; denied-request audit |
+| Routes | `app/api/deployments.py`, `health.py` | HTTP only, no Kubernetes logic |
+| Security | `app/core/security.py` | JWT verify, roles, namespace authorization, rate-limit hooks |
+| Policy | `app/core/policy.py` | registry allowlist, replica cap |
+| Rate limiter | `app/core/ratelimit.py` | in-memory sliding window, bounded memory |
+| Audit | `app/core/audit.py` | JSON line per mutation |
+| Schemas | `app/schemas.py` | request validation, response models |
+| K8s service | `app/services/k8s.py` | only code that calls Kubernetes; pre-flight; hardened manifest builder |
+| Image | `Dockerfile` | multi-stage, uid 10001, no shell login, fail-fast without secret |
+| Chart | `deploy/helm/deploy-api/` | Deployment ×2, Service, Ingress, ServiceAccount, ClusterRole, NetworkPolicy, PDB, Secret |
+| Local CI | `scripts/ci.sh` | tests → pip-audit → helm lint → docker build → image checks → deploy; `--watch` |
+| Token helper | `scripts/mint-token.sh` | bash + openssl JWT for testing |
+
+Request flow: `rate limit → token → role → namespace → input policy → cluster pre-flight → Kubernetes → audit`.
+
+## 5. Security controls
+
+| Control | Status |
+|---|---|
+| Client → API: JWT HS256 pinned; `exp/iss/aud/sub` required; `alg=none` rejected; uniform 401 | ✅ tested |
+| API → Kubernetes: pod ServiceAccount token (in-cluster config), least-privilege ClusterRole | ✅ live (`kubectl auth can-i` checked) |
+| ClusterRole allows only: namespaces get/create · deployments get/list/create/patch/delete · pods list. **Denied:** secrets, delete namespaces/pods, RBAC, nodes | ✅ live |
+| Refuses to start with signing secret < 32 bytes | ✅ tested |
+| Roles viewer < operator < admin; per-token namespace allowlist with wildcards | ✅ tested |
+| Protected namespaces hard-coded; enforced in routes **and** service layer; config cannot remove them | ✅ tested; live cluster state diffed |
+| Only objects labelled `managed-by=deploy-api` are listed/changed | ✅ live |
+| Cross-tenant ids return 404, not 403 | ✅ tested + live |
+| Strict validation; errors never echo values; Swagger/OpenAPI disabled | ✅ tested |
+| Created pods: non-root, no privilege escalation, drop ALL caps, read-only rootfs, seccomp, **no SA token** | 🟡 manifest unit-tested; ran live only with `hashicorp/http-echo` |
+| Rate limits (reads 120/min, writes 30/min per subject; failed-auth lockout 10/min per IP) | ✅ live (240 of 320 allowed with 2 pods, see §6) |
+| Audit of mutations and denied requests; tokens/bodies never logged | ✅ live |
+| Container: non-root uid 10001, read-only rootfs + dropped caps, `pip-audit` clean | ✅ checked |
+| NetworkPolicy (ingress from same ns + ingress-nginx; egress DNS + API server) | ✅ enforced on minikube (it blocked the API server until port 8443 was allowed) |
+| TLS on the ingress | ⬜ local ingress is plain HTTP |
+
+## 6. Verification record
+- **132 tests:** security, API contract, validation, manifest hardening, error translation, protected namespaces, rate limiting, audit, live-state/pre-flight. Mutation-checked: deliberately removing the pre-flight call, the `no-store` header, or adding a cache each made the new tests fail.
+- **Live on minikube via ingress (`deploy-api.localtest.me:18080`):** every endpoint and every status code in the contract; foreign (kubectl-made) deployment rejected with 409 and left untouched; `kubectl scale` visible on the very next GET; `kubectl delete` gives immediate 404; `no-store` header present; cascade delete leaves no ReplicaSets/Pods; protected namespaces unchanged (state diffed); rate limit and audit lines observed.
+- **`docs/API_TESTING.md`:** every `bash` block was extracted and executed against the live ingress; the documented codes matched.
+- **Local CI:** full pipeline passes (~110 s); a deliberately failing test stopped the pipeline before any image was built, and removing it let the watcher pass again.
+- **Bugs found and fixed along the way:** NetworkPolicy blocked the API-server port (8443 on minikube); readiness ping could stall for ~40 s on retries (now 2 s, no retries); CI script `pipefail`/`grep -q` false failure; `pip-audit -q` flag; two weak test assertions (`or True`, `and/or` precedence); the curl guide's rate-limit step undercounted because limits are per pod.
+
+## 7. What is left
+
+### Blocked on you
+1. **Push the image to a registry.** Your Docker config holds credentials for both **Docker Hub** and **AWS ECR (801935342396.dkr.ecr.ap-south-1.amazonaws.com)**. Pushing publishes the image, so tell me which one and the repository name (e.g. `docker.io/<you>/deploy-api`, or the ECR repo). The CI already supports it: `REGISTRY=<repo> ./scripts/ci.sh --push`. If the target is an EKS cluster, I should also build **multi-arch (amd64+arm64)**: the current image is arm64-only (built on Apple silicon).
+
+### Should do next
+2. **Git:** nothing is committed. Suggested: one initial commit, or one per step.
+3. **Real client IP behind the ingress:** the failed-auth lockout and audit logs currently see the ingress pod's IP (`10.244.0.x`), so one abusive client can lock out everyone for a minute. Fix: trust `X-Forwarded-For` only from the ingress.
+4. **Rate limits are per pod:** with 2 replicas the effective limit doubles (observed). Exact global limits need Redis.
+5. **TLS** on the ingress (cert-manager, or a self-signed cert for local).
+6. **Other images under the hardened pod settings:** verified only with `http-echo`. Stock `nginx` will fail (needs root); test `nginxinc/nginx-unprivileged`.
+7. **Pin NetworkPolicy egress to the API server CIDR** (`networkPolicy.apiServerCidr`) instead of port-only.
+
+### Production hardening (later)
+8. OIDC/JWKS in place of the shared HS256 secret; key rotation; token revocation.
+9. Image: pin base by digest, add a container scan (e.g. Trivy), SBOM.
+10. Load/concurrency test; list pagination; the UID lookup is O(n) over managed deployments.
+11. Metrics (Prometheus), request IDs, HPA for the API itself.
+12. Remote CI (GitHub Actions) mirroring `scripts/ci.sh`; `helm test` hook.
+13. Namespaces the API creates are never deleted automatically (document or add cleanup policy).
