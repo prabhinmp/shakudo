@@ -3,6 +3,10 @@
 Run every step **in the same terminal**, in order: later steps reuse variables from earlier ones.
 Blocks marked `bash` are runnable; blocks marked `sh` are for reading only.
 
+**Fastest path:** `./scripts/api-test.sh` runs every step below against the real cluster with PASS/FAIL assertions
+(67 checks; `--ratelimit` adds the slow rate-limit step; `BASE=... SECRET=...` points it at another server).
+The rest of this page is the same flow step by step, so you can run and inspect each command yourself.
+
 Expected status codes are shown as `# → 201`. If a step gives something else, see Troubleshooting at the end.
 
 ## 0. Prerequisites (one-time)
@@ -35,9 +39,10 @@ export BASE=http://deploy-api.localtest.me:18080
 export SECRET=$(kubectl -n deploy-api get secret deploy-api-deploy-api-jwt -o jsonpath='{.data.jwt-secret}' | base64 -d)
 
 # role + which namespaces the token may touch ("demo-*" = any namespace starting with demo-)
-export ADMIN=$(./scripts/mint-token.sh admin '["demo-*"]')
-export OPERATOR=$(./scripts/mint-token.sh operator '["demo-*"]')
-export VIEWER=$(./scripts/mint-token.sh viewer '["demo-*"]')
+# each role gets its own identity (JWT_SUB): rate limits are counted per identity, and rejected requests count too
+export ADMIN=$(JWT_SUB=admin-user ./scripts/mint-token.sh admin '["demo-*"]')
+export OPERATOR=$(JWT_SUB=operator-user ./scripts/mint-token.sh operator '["demo-*"]')
+export VIEWER=$(JWT_SUB=viewer-user ./scripts/mint-token.sh viewer '["demo-*"]')
 export OTHER=$(JWT_SUB=mallory ./scripts/mint-token.sh admin '["team-z"]')   # admin, but a different namespace
 export GOD=$(JWT_SUB=god ./scripts/mint-token.sh admin '["*"]')              # admin for everything (still blocked from protected namespaces)
 
@@ -51,6 +56,422 @@ echo "tokens ready"
 | viewer | GET list, GET detail |
 | operator | + PATCH, restart |
 | admin | + POST create, DELETE |
+
+## 1b. API reference: command and expected result for every endpoint
+
+Run section 1 first (it defines `$BASE`, `$ADMIN`, `$OPERATOR`, `$VIEWER`, `$OTHER`, `$GOD`, `api`). `$ID` is the `id` returned by create. The bodies below are **real responses captured from the live system**; values such as ids, timestamps and pod names differ on every run.
+
+| # | Endpoint | Min. role | Success | Failure codes |
+|---|---|---|---|---|
+| 1 | `GET /healthz` | none | 200 | – |
+| 2 | `GET /readyz` | none | 200 | 503 if Kubernetes is unreachable |
+| 3 | `POST /api/deployments` | admin | 201 | 400, 401, 403, 409, 429, 500 |
+| 4 | `GET /api/deployments[?namespace=]` | viewer | 200 | 400, 401, 403, 429, 500 |
+| 5 | `GET /api/deployments/{id}` | viewer | 200 | 400, 401, 404, 429, 500 |
+| 6 | `PATCH /api/deployments/{id}` | operator | 200 | 400, 401, 403, 404, 429, 500 |
+| 7 | `POST /api/deployments/{id}/restart` | operator | 200 | 400, 401, 403, 404, 429, 500 |
+| 8 | `DELETE /api/deployments/{id}` | admin | 204 | 400, 401, 403, 404, 429, 500 |
+| 9 | `GET /api/namespaces` | viewer | 200 | 401, 429 (needs image from commit `c132076`+) |
+
+### 1. `GET /healthz`: liveness (no token)
+```sh
+curl -s $BASE/healthz
+```
+**Expected: `200 OK`**
+
+```json
+{
+  "status": "ok"
+}
+```
+
+### 2. `GET /readyz`: readiness, checks the Kubernetes API (no token)
+```sh
+curl -s $BASE/readyz
+```
+**Expected: `200 OK`**
+
+```json
+{
+  "status": "ready"
+}
+```
+
+If the cluster cannot be reached: `503 {"status":"kubernetes unreachable"}`.
+
+### 3. `POST /api/deployments`: create (admin)
+Required: `name`, `namespace` (auto-created), `image`, `port`, `resources` (requests and limits), `labels`. Optional: `replicas` (default 1), `env`, `command`, `args`.
+
+```sh
+curl -s -X POST $BASE/api/deployments \
+  -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{
+    "name": "echo", "namespace": "demo-api",
+    "image": "hashicorp/http-echo:latest", "port": 5678, "replicas": 2,
+    "args": ["-listen=:5678", "-text=hello"],
+    "env": [{"name": "MODE", "value": "demo"}],
+    "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}},
+    "labels": {"app": "echo", "team": "demo"}
+  }'
+```
+**Expected: `201 Created`**
+
+```json
+{
+  "id": "046ad721-62b2-4ee8-9924-9ec7f1bc8fd1",
+  "name": "echo",
+  "namespace": "demo-api",
+  "image": "hashicorp/http-echo:latest",
+  "labels": {
+    "app": "echo",
+    "app.kubernetes.io/managed-by": "deploy-api",
+    "app.kubernetes.io/name": "echo",
+    "team": "demo"
+  },
+  "replicas": {
+    "desired": 2,
+    "ready": 0,
+    "available": 0,
+    "unavailable": 0
+  },
+  "created_at": "2026-11-12T15:29:55Z",
+  "health": "down"
+}
+```
+
+`ready` is 0 because the response is the state at creation time; poll the detail endpoint for readiness.
+
+**Same command again** (name already exists in the live cluster, even if it was not created by this API):
+
+**Expected: `409 Conflict`**
+
+```json
+{
+  "error": {
+    "code": "conflict",
+    "message": "Deployment 'echo' already exists in namespace 'demo-api'"
+  }
+}
+```
+
+### 4. `GET /api/deployments`: list, always live (viewer)
+```sh
+curl -s $BASE/api/deployments -H "Authorization: Bearer $VIEWER"                         # everything this token may see
+curl -s "$BASE/api/deployments?namespace=demo-api" -H "Authorization: Bearer $VIEWER"    # one namespace
+```
+**Expected: `200 OK`**
+
+```json
+[
+  {
+    "id": "046ad721-62b2-4ee8-9924-9ec7f1bc8fd1",
+    "name": "echo",
+    "namespace": "demo-api",
+    "image": "hashicorp/http-echo:latest",
+    "labels": {
+      "app": "echo",
+      "app.kubernetes.io/managed-by": "deploy-api",
+      "app.kubernetes.io/name": "echo",
+      "team": "demo"
+    },
+    "replicas": {
+      "desired": 2,
+      "ready": 2,
+      "available": 2,
+      "unavailable": 0
+    },
+    "created_at": "2026-11-12T15:29:55Z",
+    "health": "healthy"
+  }
+]
+```
+
+### 5. `GET /api/deployments/{id}`: detail with pods and conditions (viewer)
+```sh
+curl -s $BASE/api/deployments/$ID -H "Authorization: Bearer $VIEWER"
+```
+**Expected: `200 OK`**
+
+```json
+{
+  "id": "046ad721-62b2-4ee8-9924-9ec7f1bc8fd1",
+  "name": "echo",
+  "namespace": "demo-api",
+  "image": "hashicorp/http-echo:latest",
+  "labels": {
+    "app": "echo",
+    "app.kubernetes.io/managed-by": "deploy-api",
+    "app.kubernetes.io/name": "echo",
+    "team": "demo"
+  },
+  "replicas": {
+    "desired": 2,
+    "ready": 2,
+    "available": 2,
+    "unavailable": 0
+  },
+  "created_at": "2026-11-12T15:29:55Z",
+  "pods": [
+    {
+      "name": "echo-7888786cfb-hmj8l",
+      "phase": "Running",
+      "restart_count": 0,
+      "container_statuses": [
+        {
+          "name": "echo",
+          "ready": true,
+          "restart_count": 0,
+          "state": "running"
+        }
+      ]
+    },
+    {
+      "name": "echo-7888786cfb-npjcq",
+      "phase": "Running",
+      "restart_count": 0,
+      "container_statuses": [
+        {
+          "name": "echo",
+          "ready": true,
+          "restart_count": 0,
+          "state": "running"
+        }
+      ]
+    }
+  ],
+  "conditions": [
+    {
+      "type": "Available",
+      "status": "True",
+      "reason": "MinimumReplicasAvailable",
+      "message": "Deployment has minimum availability.",
+      "last_transition_time": "2026-11-12T15:29:59Z"
+    },
+    {
+      "type": "Progressing",
+      "status": "True",
+      "reason": "NewReplicaSetAvailable",
+      "message": "ReplicaSet \"echo-7888786cfb\" has successfully progressed.",
+      "last_transition_time": "2026-11-12T15:29:55Z"
+    }
+  ],
+  "health": "healthy"
+}
+```
+
+`health` is `healthy`, `degraded`, `down` or `idle` (scaled to zero). Response headers include `Cache-Control: no-store`.
+
+### 6. `PATCH /api/deployments/{id}`: scale and/or change image (operator)
+Only `replicas` and `image` are accepted; at least one is required.
+
+```sh
+curl -s -X PATCH $BASE/api/deployments/$ID \
+  -H "Authorization: Bearer $OPERATOR" -H "Content-Type: application/json" -d '{"replicas": 1}'
+```
+**Expected: `200 OK`**
+
+```json
+{
+  "id": "046ad721-62b2-4ee8-9924-9ec7f1bc8fd1",
+  "name": "echo",
+  "namespace": "demo-api",
+  "image": "hashicorp/http-echo:latest",
+  "labels": {
+    "app": "echo",
+    "app.kubernetes.io/managed-by": "deploy-api",
+    "app.kubernetes.io/name": "echo",
+    "team": "demo"
+  },
+  "replicas": {
+    "desired": 1,
+    "ready": 2,
+    "available": 2,
+    "unavailable": 0
+  },
+  "created_at": "2026-11-12T15:29:55Z",
+  "health": "healthy"
+}
+```
+
+### 7. `POST /api/deployments/{id}/restart`: rollout restart (operator)
+Sets the pod-template annotation `kubectl.kubernetes.io/restartedAt`, so Kubernetes replaces the pods.
+
+```sh
+curl -s -X POST $BASE/api/deployments/$ID/restart -H "Authorization: Bearer $OPERATOR"
+kubectl -n demo-api get deploy echo -o jsonpath='{.spec.template.metadata.annotations}'   # shows restartedAt
+```
+**Expected: `200 OK`**
+
+```json
+{
+  "id": "046ad721-62b2-4ee8-9924-9ec7f1bc8fd1",
+  "name": "echo",
+  "namespace": "demo-api",
+  "image": "hashicorp/http-echo:latest",
+  "labels": {
+    "app": "echo",
+    "app.kubernetes.io/managed-by": "deploy-api",
+    "app.kubernetes.io/name": "echo",
+    "team": "demo"
+  },
+  "replicas": {
+    "desired": 1,
+    "ready": 2,
+    "available": 2,
+    "unavailable": 0
+  },
+  "created_at": "2026-11-12T15:29:55Z",
+  "health": "healthy"
+}
+```
+
+### 8. `DELETE /api/deployments/{id}`: delete with cascade (admin)
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE $BASE/api/deployments/$ID -H "Authorization: Bearer $ADMIN"
+```
+**Expected: `204 No Content`** with an empty body.
+
+Foreground cascade: the Deployment stays visible until its pods have terminated (about 10 s here, up to ~30 s+ on a busy node). After that:
+
+**Expected: `404 Not Found`**
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "Deployment '046ad721-62b2-4ee8-9924-9ec7f1bc8fd1' not found"
+  }
+}
+```
+
+### 9. `GET /api/namespaces`: namespaces with managed deployments that this token may see (viewer)
+```sh
+curl -s $BASE/api/namespaces -H "Authorization: Bearer $VIEWER"
+```
+**Expected: `200 OK`**
+
+```json
+{
+  "namespaces": [
+    "demo-api",
+    "demo-chat"
+  ]
+}
+```
+
+### Error responses (real examples)
+Every error has the shape `{"error": {"code", "message", "details"?}}`.
+
+**400 invalid input** (here: DNS-incompatible name **and** `port` sent as a string; all problems are listed):
+```sh
+curl -s -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '{"name":"Bad_Name","namespace":"demo-api","image":"nginx:1","port":"80","resources":{"requests":{"cpu":"50m","memory":"32Mi"},"limits":{"cpu":"100m","memory":"64Mi"}},"labels":{"a":"b"}}'
+```
+**Expected: `400 Bad Request`**
+
+```json
+{
+  "error": {
+    "code": "invalid_input",
+    "message": "Request validation failed",
+    "details": [
+      {
+        "field": "name",
+        "message": "String should match pattern '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'"
+      },
+      {
+        "field": "port",
+        "message": "Input should be a valid integer"
+      }
+    ]
+  }
+}
+```
+
+**400 malformed JSON** (`-d '{"name": '`):
+
+**Expected: `400 Bad Request`**
+
+```json
+{
+  "error": {
+    "code": "invalid_input",
+    "message": "Request validation failed",
+    "details": [
+      {
+        "field": "9",
+        "message": "JSON decode error"
+      }
+    ]
+  }
+}
+```
+
+**401 missing/invalid token** (`curl -s $BASE/api/deployments`), response also has `WWW-Authenticate: Bearer`:
+
+**Expected: `401 Unauthorized`**
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Missing bearer token"
+  }
+}
+```
+
+**403 role too low** (viewer token on POST):
+
+**Expected: `403 Forbidden`**
+
+```json
+{
+  "error": {
+    "code": "forbidden",
+    "message": "Role 'viewer' may not perform this action"
+  }
+}
+```
+
+**403 namespace not allowed** (`?namespace=kube-system`, or any namespace outside the token's list):
+
+**Expected: `403 Forbidden`**
+
+```json
+{
+  "error": {
+    "code": "forbidden",
+    "message": "Access to namespace 'kube-system' is not allowed"
+  }
+}
+```
+
+**404 unknown id**:
+
+**Expected: `404 Not Found`**
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "Deployment '11111111-1111-1111-1111-111111111111' not found"
+  }
+}
+```
+
+**404 for another team's deployment** (existence is deliberately not revealed; identical to unknown id):
+
+**Expected: `404 Not Found`**
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "Deployment '046ad721-62b2-4ee8-9924-9ec7f1bc8fd1' not found"
+  }
+}
+```
+
+**409** duplicate name: see section 3 above. **429** too many requests: body `{"error":{"code":"rate_limited","message":"Too many requests"}}` plus a `Retry-After: <seconds>` header (section 11). **500** Kubernetes failure: `{"error":{"code":"kubernetes_error","message":"Kubernetes API error (403): exceeded quota: ..."}}` carrying the cluster's own message.
 
 ## 2. Health (no token needed)
 
@@ -116,7 +537,10 @@ kubectl -n demo-api delete deployment foreign
 Each of these must return **400** with `"code":"invalid_input"`.
 
 ```bash
-post() { api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d "$1"; }
+# Writes are limited to 30/min per identity and rejected requests count, so rotate the identity every 10 calls.
+N=0
+post() { N=$((N+1)); local T; T=$(JWT_SUB=validation-$((N/10)) ./scripts/mint-token.sh admin '["demo-*"]')
+         api -X POST $BASE/api/deployments -H "Authorization: Bearer $T" -H "Content-Type: application/json" -d "$1"; }
 GOOD_RES='"resources":{"requests":{"cpu":"50m","memory":"32Mi"},"limits":{"cpu":"100m","memory":"64Mi"}}'
 
 echo "-- DNS-incompatible name";   post '{"name":"Bad_Name","namespace":"demo-api","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
@@ -128,7 +552,30 @@ echo "-- missing required fields"; post '{"name":"x"}'
 echo "-- unknown field (privileged)"; post '{"name":"x","namespace":"demo-api","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"},"privileged":true}'
 echo "-- registry not allowed";    post '{"name":"x","namespace":"demo-api","image":"evil.example.com/miner:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
 echo "-- replicas above cap";      post '{"name":"x","namespace":"demo-api","image":"nginx:1","port":80,"replicas":999,'"$GOOD_RES"',"labels":{"a":"b"}}'
+
+echo "-- wrong types are rejected, never coerced (replicas as text / decimal / boolean)"
+post '{"name":"x","namespace":"demo-api","image":"nginx:1","port":80,"replicas":"abc",'"$GOOD_RES"',"labels":{"a":"b"}}'
+post '{"name":"x","namespace":"demo-api","image":"nginx:1","port":80,"replicas":1.5,'"$GOOD_RES"',"labels":{"a":"b"}}'
+post '{"name":"x","namespace":"demo-api","image":"nginx:1","port":80,"replicas":"3",'"$GOOD_RES"',"labels":{"a":"b"}}'
+post '{"name":"x","namespace":"demo-api","image":"nginx:1","port":80,"replicas":true,'"$GOOD_RES"',"labels":{"a":"b"}}'
+echo "-- port as a string";        post '{"name":"x","namespace":"demo-api","image":"nginx:1","port":"80",'"$GOOD_RES"',"labels":{"a":"b"}}'
+echo "-- name: trailing hyphen / dot / empty / unicode"
+post '{"name":"web-","namespace":"demo-api","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
+post '{"name":"my.app","namespace":"demo-api","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
+post '{"name":"","namespace":"demo-api","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
+post '{"name":"名前","namespace":"demo-api","image":"nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
+echo "-- image: uppercase registry host"; post '{"name":"x","namespace":"demo-api","image":"Docker.IO/library/nginx:1","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
+echo "-- image: longer than 255 chars";    post '{"name":"x","namespace":"demo-api","image":"'"$(printf 'a%.0s' $(seq 1 256))"'","port":80,'"$GOOD_RES"',"labels":{"a":"b"}}'
+
+echo "-- malformed JSON body (400, not FastAPI's default 422)"
+ADMIN=$(JWT_SUB=admin-user2 ./scripts/mint-token.sh admin '["demo-*"]')
+api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '{"name": '
+api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d ''
+api -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '[]'
 ```
+
+Every response above has the same shape: `{"error": {"code": "invalid_input", "message": "...", "details": [...]}}`, and
+the submitted value is never echoed back. Unknown routes and wrong methods use that shape too (404 `not_found`, 405 `method_not_allowed`).
 
 ## 6. List (GET, viewer)
 
@@ -137,6 +584,7 @@ api -H "Authorization: Bearer $VIEWER" $BASE/api/deployments                    
 api -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=demo-api"          # → 200 filtered
 api -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=team-z"            # → 403 namespace not allowed
 api -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=BAD!"              # → 400
+for NSV in UPPER a.b a- -a; do api -H "Authorization: Bearer $VIEWER" "$BASE/api/deployments?namespace=$NSV"; done   # → 400 each
 ```
 
 ## 7. Detail (GET by id, viewer)
@@ -162,6 +610,22 @@ curl -s -H "Authorization: Bearer $VIEWER" $BASE/api/deployments/$ID | python3 -
 curl -s -D - -o /dev/null -H "Authorization: Bearer $VIEWER" $BASE/api/deployments | grep -iE "^HTTP|cache-control|pragma"                                     # → cache-control: no-store
 ```
 
+## 7b. Namespaces, health and security headers
+
+*These need an image built from commit `c132076` or later; on an older deployment `/api/namespaces` returns 404.*
+
+`GET /api/namespaces` returns the namespaces that hold managed deployments **and** that your token may see (for UI filters).
+List and detail responses also carry a computed `health` field: `healthy`, `degraded` (some replicas missing, or a pod is in
+CrashLoopBackOff/ImagePullBackOff), `down` (wanted but none ready) or `idle` (scaled to zero on purpose).
+
+```bash
+api -H "Authorization: Bearer $VIEWER" $BASE/api/namespaces                    # → 200 {"namespaces":["demo-api"]}
+api -H "Authorization: Bearer $OTHER"  $BASE/api/namespaces                    # → 200 {"namespaces":[]}  (other team sees none of ours)
+api $BASE/api/namespaces                                                       # → 401
+curl -s -H "Authorization: Bearer $VIEWER" $BASE/api/deployments/$ID | python3 -c 'import sys,json; print("health:", json.load(sys.stdin)["health"])'
+curl -s -D - -o /dev/null $BASE/healthz | grep -iE "x-content-type-options|x-frame-options|content-security-policy"   # nosniff, DENY, CSP
+```
+
 ## 8. Update (PATCH, operator)
 
 Only `replicas` and `image` can be changed; at least one is required.
@@ -172,6 +636,9 @@ api -X PATCH $BASE/api/deployments/$ID -H "Authorization: Bearer $OPERATOR" -H "
 api -X PATCH $BASE/api/deployments/$ID -H "Authorization: Bearer $OPERATOR" -H "Content-Type: application/json" -d '{}'                                         # → 400 nothing to change
 api -X PATCH $BASE/api/deployments/$ID -H "Authorization: Bearer $OPERATOR" -H "Content-Type: application/json" -d '{"replicas": -3}'                           # → 400 negative
 api -X PATCH $BASE/api/deployments/$ID -H "Authorization: Bearer $OPERATOR" -H "Content-Type: application/json" -d '{"name": "hacked"}'                         # → 400 field not allowed
+api -X PATCH $BASE/api/deployments/$ID -H "Authorization: Bearer $OPERATOR" -H "Content-Type: application/json" -d '{"replicas": "abc"}'                        # → 400 wrong type
+api -X PATCH $BASE/api/deployments/$ID -H "Authorization: Bearer $OPERATOR" -H "Content-Type: application/json" -d '{"replicas": 1.5}'                          # → 400 not an integer
+api -X PATCH $BASE/api/deployments/$ID -H "Authorization: Bearer $OPERATOR" -H "Content-Type: application/json" -d '{"replicas":'                               # → 400 malformed JSON
 kubectl -n demo-api get deploy echo -o jsonpath='replicas={.spec.replicas} image={.spec.template.spec.containers[0].image}{"\n"}'   # confirm in the cluster
 ```
 
@@ -211,18 +678,23 @@ Reads are limited to 120/min per token subject (writes 30/min). **Limits are cou
 
 ```bash
 RL=$(JWT_SUB=ratelimit-demo ./scripts/mint-token.sh viewer '["demo-*"]')
-for i in $(seq 1 320); do curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $RL" $BASE/api/deployments; done | sort | uniq -c   # → roughly 240 x 200 and 80 x 429
+for i in $(seq 1 320); do curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $RL" $BASE/api/deployments; done | sort | uniq -c   # → 2 pods (ingress): about 240 x 200 and 80 x 429; one pod (local server): 120 x 200 and 200 x 429
 curl -s -i -H "Authorization: Bearer $RL" $BASE/api/deployments | grep -iE "^HTTP|retry-after"                                                    # → 429 + Retry-After
 ```
 
 ## 12. Delete (DELETE, admin)
 
-Foreground cascade: the Deployment's ReplicaSets and Pods are removed too.
+Foreground cascade: the Deployment's ReplicaSets and Pods are removed too. **The Deployment stays visible (still 200) until
+its pods have finished terminating**, which can take up to the pod's 30 s grace period, so poll instead of sleeping:
 
 ```bash
-api -X DELETE $BASE/api/deployments/$ID -H "Authorization: Bearer $ADMIN"               # → 204
-sleep 10
-api -H "Authorization: Bearer $VIEWER" $BASE/api/deployments/$ID                         # → 404 gone
+api -X DELETE $BASE/api/deployments/$ID -H "Authorization: Bearer $ADMIN"               # → 204 (deletion accepted)
+for i in $(seq 1 60); do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $VIEWER" $BASE/api/deployments/$ID)
+  [ "$CODE" = "404" ] && { echo "gone after ~$((i*2))s"; break; }
+  [ $i = 60 ] && echo "still terminating after 120s: the node is busy; check: kubectl -n demo-api get pods"; sleep 2
+done                                                                                     # → 404 once pods are gone (typically 10-30 s)
+api -X DELETE $BASE/api/deployments/$ID -H "Authorization: Bearer $ADMIN"               # → 404 second delete
 kubectl -n demo-api get deploy,rs,pods                                                   # → "No resources found"
 ```
 
@@ -250,5 +722,6 @@ echo "done. Stop the port-forward terminal with Ctrl-C."
 | `404 nginx` page | wrong Host header; the ingress only routes `deploy-api.localtest.me` |
 | 401 on every call | secret mismatch: re-run step 1; or the token expired (default 1 h) |
 | 429 right after several 401s | repeated failed auth locks the caller's IP for 60 s. **Through the ingress all clients share the ingress pod's IP**, so wait a minute |
+| DELETE returned 204 but GET still shows the deployment | normal: foreground deletion waits for pods to terminate (up to ~30 s). Poll until 404 |
 | 500 `Kubernetes API error ... exceeded quota` | the cluster rejected the request; the message says why |
 | Pod `CreateContainerConfigError` / `CrashLoopBackOff` for another image | pods run non-root with a read-only filesystem. Use an image that supports it (e.g. `nginxinc/nginx-unprivileged`) |

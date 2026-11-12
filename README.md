@@ -10,7 +10,7 @@ deployments it created itself.
 | Data | Every GET reads the live cluster (no cache, `Cache-Control: no-store`); POST pre-checks the cluster and rejects an existing name (even if not created by the API) before creating anything |
 | Auth | Client → API: JWT bearer (HS256). API → Kubernetes: pod ServiceAccount token + RBAC |
 | Packaging | Docker image (non-root) + Helm chart |
-| More docs | [Feature/progress catalog](docs/CATALOG.md) · [curl test guide](docs/API_TESTING.md) |
+| More docs | [Feature/progress catalog](docs/CATALOG.md) · [curl test guide](docs/API_TESTING.md) · [Technology stack](docs/TECH_STACK.md) |
 
 ## Architecture
 

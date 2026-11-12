@@ -3,7 +3,7 @@
 Python (FastAPI) service that creates and manages Kubernetes Deployments through a secured REST API.
 Legend: ✅ built and verified · 🟡 built, partly verified · ⬜ not started · ⏸ blocked on a decision
 
-_Last updated: 2026-11-12. Tests: **132 unit + 7 real-cluster integration (no mocks), all passing**. Verified live on minikube through the ingress (local port 18080)._
+_Last updated: 2026-11-12. Tests: **304 unit + 7 real-cluster integration (no mocks) + 67 curl assertions, all passing**. Verified live on minikube through the ingress (local port 18080)._
 
 ## 1. Progress at a glance
 
@@ -26,6 +26,8 @@ _Last updated: 2026-11-12. Tests: **132 unit + 7 real-cluster integration (no mo
 | 12 | **Push image to a registry** | ⏸ waiting for your choice of registry (see §7) |
 | 13 | Git: 6 local commits + auto-commit on green builds (`ci.sh --commit`) | 🟡 committed locally; **push to GitHub blocked, see §7** |
 | 13b | No-mock proof: production code/image audited; real-cluster integration suite | ✅ |
+| 13c | Strict input validation (strict ints, anchored regexes, uniform error shape) + edge-case tests | ✅ |
+| 13d | `docs/API_TESTING.md` with per-endpoint commands and real expected responses; `scripts/api-test.sh`; `docs/TECH_STACK.md` | ✅ |
 | 14 | Production hardening (TLS, shared rate limits, OIDC, multi-arch, image scan) | ⬜ see §7 |
 
 ## 2. Features
@@ -108,6 +110,8 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 | TLS on the ingress | ⬜ local ingress is plain HTTP |
 
 ## 6. Verification record
+- **Validation hardening (found by edge-case tests):** `replicas`/`port` accepted `"3"`, `2.0` and `true` (coerced); trailing newline passed the image/label/env/quantity regexes (`.match` + `$`); framework errors (unparseable body, unknown route, wrong method) used FastAPI's `{"detail"}` shape. Fixed with `StrictInt`, `fullmatch`, and a handler that uses the standard error shape. Each fix was mutation-checked.
+- **Known behaviour:** after `DELETE` returns 204 the deployment remains visible until its pods finish terminating (about 4-12 s here, longer on a loaded node); the API does not yet expose a "terminating" state.
 - **No mock data in production:** `app/` contains no mock/fake/stub/sample data (only two comments mention that tests substitute a fake); nothing in `app/` imports from `tests/`; the Docker image contains only `/srv/app` (no tests, no fakes); every API value comes from a real Kubernetes client call. The unit tests do use an in-memory fake and `MagicMock` (test-only), which is why a separate **no-mock integration suite** exists: `tests/integration/` runs the real app and real service against the real cluster and cross-checks results with an independent raw Kubernetes client (create, duplicate, live reads, patch, restart, cascade delete, foreign deployment, protected namespaces). Run: `pytest -m integration` or `./scripts/ci.sh --integration`.
 - **132 tests:** security, API contract, validation, manifest hardening, error translation, protected namespaces, rate limiting, audit, live-state/pre-flight. Mutation-checked: deliberately removing the pre-flight call, the `no-store` header, or adding a cache each made the new tests fail.
 - **Live on minikube via ingress (`deploy-api.localtest.me:18080`):** every endpoint and every status code in the contract; foreign (kubectl-made) deployment rejected with 409 and left untouched; `kubectl scale` visible on the very next GET; `kubectl delete` gives immediate 404; `no-store` header present; cascade delete leaves no ReplicaSets/Pods; protected namespaces unchanged (state diffed); rate limit and audit lines observed.
