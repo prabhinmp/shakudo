@@ -100,7 +100,7 @@ curl -s $BASE/readyz
 If the cluster cannot be reached: `503 {"status":"kubernetes unreachable"}`.
 
 ### 3. `POST /api/deployments`: create (admin)
-Required: `name`, `namespace` (auto-created), `image`, `port`, `resources` (requests and limits), `labels`. Optional: `replicas` (default 1), `env`, `command`, `args`.
+Required: `name`, `namespace` (auto-created), `image`, `port`, `resources` (requests and limits). Optional: `replicas` (default 1), `labels` (the API always adds `app.kubernetes.io/name` and `managed-by`), `env`, `command`, `args`.
 
 ```sh
 curl -s -X POST $BASE/api/deployments \
@@ -489,7 +489,7 @@ api -H "Authorization: Bearer not-a-real-token" $BASE/api/deployments   # → 40
 
 ## 4. Create a deployment (POST, admin)
 
-Required: `name`, `namespace` (created if missing), `image`, `port`, `resources` (requests + limits), `labels`.
+Required: `name`, `namespace` (created if missing), `image`, `port`, `resources` (requests + limits). Optional: `labels`.
 Optional: `replicas` (default 1), `env`, `command`, `args`.
 
 ```bash

@@ -42,8 +42,7 @@ _Last updated: 2026-11-12. Tests: **304 unit + 7 real-cluster integration (no mo
 | F6 | Delete with foreground cascade (ReplicaSets, Pods) | `DELETE /api/deployments/{id}` | admin | ✅ unit + live |
 | F7 | Liveness / readiness | `GET /healthz`, `/readyz` | none | ✅ unit + live |
 
-`{id}` is the Deployment UID. POST rules: `name`, `namespace`, `image`, `port`, `resources` (requests+limits), `labels` are
-required; `replicas` (default 1), `env`, `command`, `args` optional; unknown fields rejected. See `app/schemas.py`.
+`{id}` is the Deployment UID. POST fields: **mandatory** `name`, `namespace`, `image`, `port`, and `resources` (`requests` and `limits`, each with `cpu` and `memory`); **optional** `replicas` (default 1), `env`, `labels`, `command`, `args`; unknown fields are rejected. Enforced by `tests/test_field_spec.py`. See `app/schemas.py`.
 
 ### Live-state guarantees
 - **GET is never cached.** No cache layer exists in the app; every list/detail reads the cluster at request time
