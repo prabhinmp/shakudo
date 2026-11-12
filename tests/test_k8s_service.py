@@ -9,7 +9,7 @@ from app.errors import ConflictError, KubernetesError, NotFoundError
 from app.schemas import DeploymentCreate
 from app.services.k8s import KubernetesService, _translate, build_manifest
 
-SETTINGS = Settings(jwt_secret="x" * 32)
+SETTINGS = Settings(jwt_secret="x" * 32, pod_hardening=True)   # these tests cover the hardened mode
 
 
 @pytest.fixture
@@ -105,3 +105,28 @@ def test_manifest_without_user_labels_still_has_selector_and_ownership_labels(va
     assert m["metadata"]["labels"] == own
     assert m["spec"]["template"]["metadata"]["labels"] == own
     assert m["spec"]["selector"]["matchLabels"] == own      # selector matches the pod template, so pods are adopted
+
+
+# ---------------- writable /tmp (scratch space) while the root filesystem stays read-only ----------------
+def test_pods_get_a_small_writable_tmp_and_keep_a_read_only_root(valid_body):
+    m = build_manifest(DeploymentCreate(**valid_body), SETTINGS)
+    pod = m["spec"]["template"]["spec"]
+    c = pod["containers"][0]
+    assert c["volumeMounts"] == [{"name": "tmp", "mountPath": "/tmp"}]
+    assert pod["volumes"] == [{"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}}]   # disk-backed (no medium), size-capped
+    assert c["securityContext"]["readOnlyRootFilesystem"] is True                    # unchanged
+    assert c["securityContext"]["runAsNonRoot"] is True and c["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+    assert pod["automountServiceAccountToken"] is False
+
+
+def test_writable_tmp_can_be_switched_off(valid_body):
+    m = build_manifest(DeploymentCreate(**valid_body), Settings(jwt_secret="x" * 32, pod_hardening=True, pod_writable_tmp=False))
+    pod = m["spec"]["template"]["spec"]
+    assert "volumes" not in pod and "volumeMounts" not in pod["containers"][0]
+
+
+def test_tmp_is_only_scratch_nothing_else_is_writable(valid_body):
+    m = build_manifest(DeploymentCreate(**valid_body), SETTINGS)
+    mounts = m["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    assert [x["mountPath"] for x in mounts] == ["/tmp"]                                # no other writable path is added
+    assert not any("hostPath" in v for v in m["spec"]["template"]["spec"]["volumes"])

@@ -106,7 +106,7 @@ curl -s $BASE/readyz
 If the cluster cannot be reached: `503 {"status":"kubernetes unreachable"}`.
 
 ### 3. `POST /api/deployments`: create (admin)
-Required: `name`, `namespace` (auto-created), `image`, `port`, `resources` (requests and limits). Optional: `replicas` (default 1), `labels` (the API always adds `app.kubernetes.io/name` and `managed-by`), `env`, `command`, `args`.
+Required: `name`, `namespace` (auto-created), `image`, `port`, `resources` (requests and limits). Optional: `replicas` (default 1), `writable_paths`, `run_as_user`, `labels` (the API always adds `app.kubernetes.io/name` and `managed-by`), `env`, `command`, `args`.
 
 ```sh
 curl -s -X POST $BASE/api/deployments \
@@ -741,35 +741,36 @@ kubectl delete namespace demo-api scope-demo --wait=false
 echo "done. Stop the port-forward terminal with Ctrl-C."
 ```
 
-## Public images that work with the hardened pods
+## Public images and pod security
 
-Every pod the API creates is non-root (uid 10001), has a **read-only root filesystem**, no capabilities and no writable `/tmp`.
-These public images were verified under exactly those settings, both in Docker (HTTP 200) and through this API on the cluster
-(`health: healthy`, pod `1/1 Running`). Use the `port`, `args` and `env` shown.
-
-| Image | `port` | Extra fields | What it is |
-|---|---|---|---|
-| `hashicorp/http-echo:latest` | 5678 | `"args": ["-listen=:5678", "-text=hello"]` | tiny text responder (used throughout this guide) |
-| `traefik/whoami:latest` | 8080 | `"args": ["--port", "8080"]` | prints host and request details |
-| `ghcr.io/stefanprodan/podinfo:latest` | 9898 | none | small demo app with a UI and `/healthz` |
-| `jmalloc/echo-server:latest` | 8080 | `"env": [{"name": "PORT", "value": "8080"}]` | echoes the request |
-| `ealen/echo-server:latest` | 8080 | `"env": [{"name": "PORT", "value": "8080"}]` | echoes the request as JSON |
-| `mendhak/http-https-echo:latest` | 8080 | none | echoes the request as JSON |
-
-**Do not work** under these settings (verified): `nginx:latest` (`mkdir() "/var/cache/nginx/client_temp" failed: Read-only file system`) and
-`nginxinc/nginx-unprivileged:latest` (`mkdir() "/tmp/proxy_temp" failed: Read-only file system`). Both run only if the read-only filesystem is turned
-off (`DEPLOY_API_POD_READ_ONLY_ROOT_FS=false`), and stock `nginx` still fails then (`Permission denied`, root-owned directories).
-Only registries on the allowlist (`docker.io`, `ghcr.io`) are accepted; `gcr.io`, `quay.io` or `registry.k8s.io` images get a 400 unless
-`DEPLOY_API_ALLOWED_REGISTRIES` is extended.
-
-Example (any row above):
+**Default: pod security is OFF.** Pods the API creates run as their image intends, so any public image runs with a plain request:
+stock `nginx:latest` (port 80), `httpd`, `postgres`, `redis`, `nginxinc/nginx-unprivileged`, `hashicorp/http-echo`, and so on (all verified on the cluster).
+No `writable_paths` or `run_as_user` are needed.
 
 ```sh
 curl -s -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN_ANY" -H "Content-Type: application/json" -d '{
-  "name": "whoami", "namespace": "testuser-api", "image": "traefik/whoami:latest", "port": 8080, "args": ["--port", "8080"],
-  "resources": {"requests": {"cpu": "20m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "128Mi"}}
+  "name": "web", "namespace": "testuser-api", "image": "nginx:latest", "port": 80, "replicas": 2,
+  "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}}
 }'
 ```
+
+**Enforcing the lock-down** (`DEPLOY_API_POD_HARDENING=true`, chart `config.podHardening: true`) runs pods non-root (uid 10001) with a read-only root
+filesystem, no capabilities, seccomp and no privilege escalation. Images that need to write then require two optional request fields:
+
+| Field | Meaning |
+|---|---|
+| `writable_paths` | up to 8 absolute paths mounted as size-capped scratch volumes (`emptyDir`, 64Mi); the root filesystem stays read-only. `/proc`, `/sys`, `/dev`, `..` and relative paths are rejected |
+| `run_as_user` | a non-root uid (1 to 65535); `0` is rejected |
+
+Verified with hardening ON (Docker and/or cluster): `nginx:latest` with `"writable_paths": ["/var/cache/nginx", "/var/run"]`;
+`nginxinc/nginx-unprivileged` (port 8080, `/tmp` is mounted by default); `httpd:alpine` with `"run_as_user": 1000, "writable_paths": ["/usr/local/apache2/logs"]`;
+`caddy:alpine` with `"run_as_user": 1000, "writable_paths": ["/data", "/config"]`; `redis:alpine` with `"run_as_user": 999, "writable_paths": ["/data"]`;
+`prom/prometheus` with `"run_as_user": 65534, "writable_paths": ["/prometheus"]`; and with no extras: `hashicorp/http-echo` (5678), `traefik/whoami` (`"args": ["--port","8080"]`),
+`ghcr.io/stefanprodan/podinfo` (9898), `jmalloc/echo-server` and `ealen/echo-server` (`"env": [{"name":"PORT","value":"8080"}]`), `mendhak/http-https-echo` (8080).
+Does **not** work with hardening ON: `postgres` (its init needs to own and chmod the data directory, so it needs root).
+
+Only registries on the allowlist (`docker.io`, `ghcr.io`) are accepted; `gcr.io`, `quay.io` or `registry.k8s.io` images get a 400 unless
+`DEPLOY_API_ALLOWED_REGISTRIES` is extended.
 
 ## Troubleshooting
 
@@ -784,4 +785,4 @@ curl -s -X POST $BASE/api/deployments -H "Authorization: Bearer $ADMIN_ANY" -H "
 | 429 right after several 401s | repeated failed auth locks the caller's IP for 60 s. **Through the ingress all clients share the ingress pod's IP**, so wait a minute |
 | DELETE returned 204 but GET still shows the deployment | normal: foreground deletion waits for pods to terminate (up to ~30 s). Poll until 404 |
 | 500 `Kubernetes API error ... exceeded quota` | the cluster rejected the request; the message says why |
-| Pod `CrashLoopBackOff` / `Error` (e.g. `nginx:latest`, `nginx-unprivileged`: `mkdir() ... Read-only file system`) | the image writes to its own filesystem, but pods are non-root + read-only with no writable `/tmp`. Pick an image from [Public images that work with the hardened pods](#public-images-that-work-with-the-hardened-pods). `GET /api/deployments/{id}` shows the container state and `health` (`down`/`degraded`) |
+| Pod `CrashLoopBackOff` / `Error` with `Read-only file system` or `Permission denied` | pod hardening is ON (`DEPLOY_API_POD_HARDENING=true`) and the image needs to write or run as another user. Use `writable_paths` / `run_as_user`, or turn hardening off (default). See [Public images and pod security](#public-images-and-pod-security) |

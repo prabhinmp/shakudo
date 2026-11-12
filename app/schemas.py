@@ -25,6 +25,11 @@ ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CPU_RE = re.compile(r"^(\d+(?:\.\d+)?|\d+m)$")
 MEM_RE = re.compile(r"^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G|T)?$")
 
+# Writable scratch directories (emptyDir) a workload may ask for. The root filesystem stays read-only.
+PATH_RE = re.compile(r"^/[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$")
+FORBIDDEN_PATH_PREFIXES = ("/proc", "/sys", "/dev")
+MAX_WRITABLE_PATHS = 8
+
 MAX_CPU_MILLI = 4000  # 4 cores per container
 MAX_MEM_BYTES = 8 * 1024**3  # 8 GiB per container
 _MEM_UNITS = {None: 1, "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4,
@@ -114,6 +119,25 @@ class DeploymentCreate(Strict):
     args: list[str] | None = Field(default=None, max_length=50)
 
     _image = field_validator("image")(_check_image)
+
+    # Optional pod tuning. Both are bounded so they can never weaken the lock-down: the root
+    # filesystem stays read-only, capabilities stay dropped, and uid 0 (root) is not accepted.
+    writable_paths: list[str] = Field(default_factory=list, max_length=MAX_WRITABLE_PATHS)
+    run_as_user: StrictInt | None = Field(default=None, ge=1, le=65535)
+
+    @field_validator("writable_paths")
+    @classmethod
+    def _paths(cls, v: list[str]) -> list[str]:
+        for path in v:
+            if len(path) > 200 or not PATH_RE.fullmatch(path):
+                raise ValueError(f"'{path[:40]}' is not a valid absolute path (no '..', no trailing slash)")
+            if any(seg in (".", "..") for seg in path.split("/")):
+                raise ValueError(f"'{path[:40]}' must not contain '.' or '..' segments")
+            if any(path == f or path.startswith(f + "/") for f in FORBIDDEN_PATH_PREFIXES):
+                raise ValueError(f"'{path}' is not allowed (system path)")
+        if len(set(v)) != len(v):
+            raise ValueError("writable_paths must be unique")
+        return v
 
     @field_validator("env")
     @classmethod

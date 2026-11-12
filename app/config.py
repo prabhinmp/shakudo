@@ -40,8 +40,16 @@ class Settings(BaseSettings):
     rate_limit_auth_fail_per_min: int = 10  # failed-auth attempts per client IP
 
     # --- Workload hardening applied to every pod we create ---
+    # Master switch for the securityContext on pods this API creates. OFF by default (per the operator's
+    # decision): pods run as the image intends (often root, writable filesystem, default capabilities).
+    # Set DEPLOY_API_POD_HARDENING=true to enforce: non-root, read-only root fs, no capabilities, seccomp.
+    pod_hardening: bool = False
     pod_run_as_user: int = 10001
     pod_read_only_root_fs: bool = True
+    # A small writable emptyDir mounted at /tmp. The root filesystem stays read-only; many images
+    # (e.g. nginxinc/nginx-unprivileged) only need scratch space under /tmp to run.
+    pod_writable_tmp: bool = True
+    pod_tmp_size_limit: str = "64Mi"
 
     # --- Kubernetes client ---
     kube_timeout_seconds: int = 10

@@ -44,21 +44,40 @@ def build_manifest(spec: DeploymentCreate, settings: Settings) -> dict:
         "image": spec.image,
         "ports": [{"containerPort": spec.port}],
         "resources": spec.resources.model_dump(),
-        "securityContext": {
+    }
+    if settings.pod_hardening:
+        container["securityContext"] = {
             "runAsNonRoot": True,
-            "runAsUser": settings.pod_run_as_user,
+            "runAsUser": spec.run_as_user or settings.pod_run_as_user,   # never 0: schema rejects it
             "allowPrivilegeEscalation": False,
             "readOnlyRootFilesystem": settings.pod_read_only_root_fs,
             "capabilities": {"drop": ["ALL"]},
             "seccompProfile": {"type": "RuntimeDefault"},
-        },
-    }
+        }
+    elif spec.run_as_user:
+        container["securityContext"] = {"runAsUser": spec.run_as_user}   # hardening off: only an explicit uid is applied
     if spec.env:
         container["env"] = [{"name": e.name, "value": e.value} for e in spec.env]
     if spec.command:
         container["command"] = spec.command
     if spec.args:
         container["args"] = spec.args
+
+    pod_spec = {
+        "automountServiceAccountToken": False,  # workloads get no API credentials
+        "containers": [container],
+    }
+    # Scratch space only (emptyDir: disk-backed, size-capped). The root filesystem stays read-only.
+    mounts, volumes = [], []
+    if settings.pod_hardening and settings.pod_writable_tmp:     # scratch /tmp only matters with a read-only root
+        mounts.append({"name": "tmp", "mountPath": "/tmp"})
+        volumes.append({"name": "tmp", "emptyDir": {"sizeLimit": settings.pod_tmp_size_limit}})
+    for i, path in enumerate(p for p in spec.writable_paths if not (settings.pod_hardening and settings.pod_writable_tmp and p == "/tmp")):
+        mounts.append({"name": f"scratch-{i}", "mountPath": path})
+        volumes.append({"name": f"scratch-{i}", "emptyDir": {"sizeLimit": settings.pod_tmp_size_limit}})
+    if mounts:
+        container["volumeMounts"] = mounts
+        pod_spec["volumes"] = volumes
 
     return {
         "apiVersion": "apps/v1",
@@ -69,10 +88,7 @@ def build_manifest(spec: DeploymentCreate, settings: Settings) -> dict:
             "selector": {"matchLabels": selector},
             "template": {
                 "metadata": {"labels": labels},
-                "spec": {
-                    "automountServiceAccountToken": False,  # workloads get no API credentials
-                    "containers": [container],
-                },
+                "spec": pod_spec,
             },
         },
     }

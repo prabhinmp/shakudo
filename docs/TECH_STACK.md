@@ -24,7 +24,7 @@ Versions are the ones **actually installed and used** when this document was wri
 | Concern | Technology | Detail |
 |---|---|---|
 | Container image | Docker, multi-stage build | Base `python:3.14-slim`; dependencies built in a venv, runtime stage has no build tools |
-| Image hardening | non-root user | uid/gid 10001, no home dir, `nologin` shell; Kubernetes also enforces read-only root FS, no privilege escalation, all capabilities dropped, seccomp `RuntimeDefault` |
+| Image hardening | non-root user for the API's own image | uid/gid 10001, no home dir, `nologin` shell. For the **workloads the API creates**, a pod `securityContext` is a switch (`DEPLOY_API_POD_HARDENING`, **off by default**): when on, non-root, read-only root FS, all capabilities dropped, seccomp `RuntimeDefault` |
 | Process model | single Uvicorn process | listens on `8080`; scaling is done with pod replicas (2 by default), not worker processes |
 | Handlers | synchronous `def` routes | FastAPI runs them in a thread pool, which suits the blocking Kubernetes client |
 | State | **none** | stateless; Kubernetes is the single source of truth; **no database, no cache** (reads are always live) |

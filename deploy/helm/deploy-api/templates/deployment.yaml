@@ -52,6 +52,7 @@ spec:
             - {name: DEPLOY_API_RATE_LIMIT_READ_PER_MIN, value: {{ .Values.config.rateLimitReadPerMin | quote }}}
             - {name: DEPLOY_API_RATE_LIMIT_WRITE_PER_MIN, value: {{ .Values.config.rateLimitWritePerMin | quote }}}
             - {name: DEPLOY_API_RATE_LIMIT_AUTH_FAIL_PER_MIN, value: {{ .Values.config.rateLimitAuthFailPerMin | quote }}}
+            - {name: DEPLOY_API_POD_HARDENING, value: {{ .Values.config.podHardening | quote }}}
             - {name: DEPLOY_API_POD_READ_ONLY_ROOT_FS, value: {{ .Values.config.podReadOnlyRootFs | quote }}}
             - {name: DEPLOY_API_LOG_LEVEL, value: {{ .Values.config.logLevel | quote }}}
           livenessProbe:

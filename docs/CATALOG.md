@@ -3,7 +3,7 @@
 Python (FastAPI) service that creates and manages Kubernetes Deployments through a secured REST API.
 Legend: ✅ built and verified · 🟡 built, partly verified · ⬜ not started · ⏸ blocked on a decision
 
-_Last updated: 2026-11-12. Tests: **304 unit + 7 real-cluster integration (no mocks) + 76 curl assertions, all passing**. Verified live on minikube through the ingress (local port 18080)._
+_Last updated: 2026-11-12. Tests: **398 unit + 7 real-cluster integration (no mocks) + 76 curl assertions, all passing**. Verified live on minikube through the ingress (local port 18080)._
 
 ## 1. Progress at a glance
 
@@ -42,7 +42,7 @@ _Last updated: 2026-11-12. Tests: **304 unit + 7 real-cluster integration (no mo
 | F6 | Delete with foreground cascade (ReplicaSets, Pods) | `DELETE /api/deployments/{id}` | admin | ✅ unit + live |
 | F7 | Liveness / readiness | `GET /healthz`, `/readyz` | none | ✅ unit + live |
 
-`{id}` is the Deployment UID. POST fields: **mandatory** `name`, `namespace`, `image`, `port`, and `resources` (`requests` and `limits`, each with `cpu` and `memory`); **optional** `replicas` (default 1), `env`, `labels`, `command`, `args`; unknown fields are rejected. Enforced by `tests/test_field_spec.py`. See `app/schemas.py`.
+`{id}` is the Deployment UID. POST fields: **mandatory** `name`, `namespace`, `image`, `port`, and `resources` (`requests` and `limits`, each with `cpu` and `memory`); **optional** `replicas` (default 1), `env`, `labels`, `command`, `args`, `writable_paths`, `run_as_user`; unknown fields are rejected. Enforced by `tests/test_field_spec.py`. See `app/schemas.py`.
 
 ### Live-state guarantees
 - **GET is never cached.** No cache layer exists in the app; every list/detail reads the cluster at request time
@@ -101,7 +101,7 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 | Only objects labelled `managed-by=deploy-api` are listed/changed | ✅ live |
 | Cross-tenant ids return 404, not 403 | ✅ tested + live |
 | Strict validation; errors never echo values; Swagger/OpenAPI disabled | ✅ tested |
-| Created pods: non-root, no privilege escalation, drop ALL caps, read-only rootfs, seccomp, **no SA token** | 🟡 manifest unit-tested; ran live only with `hashicorp/http-echo` |
+| Created pods: securityContext is a **switch, OFF by default** (operator decision): off = pods run as their image intends; on (`DEPLOY_API_POD_HARDENING=true`) = non-root, no privilege escalation, drop ALL caps, read-only rootfs + small `/tmp`, seccomp; no SA token either way | ✅ both modes tested and verified on the cluster |
 | Rate limits (reads 120/min, writes 30/min per subject; failed-auth lockout 10/min per IP) | ✅ live (240 of 320 allowed with 2 pods, see §6) |
 | Audit of mutations and denied requests; tokens/bodies never logged | ✅ live |
 | Container: non-root uid 10001, read-only rootfs + dropped caps, `pip-audit` clean | ✅ checked |
@@ -129,7 +129,7 @@ Request flow: `rate limit → token → role → namespace → input policy → 
 3. **Real client IP behind the ingress:** the failed-auth lockout and audit logs currently see the ingress pod's IP (`10.244.0.x`), so one abusive client can lock out everyone for a minute. Fix: trust `X-Forwarded-For` only from the ingress.
 4. **Rate limits are per pod:** with 2 replicas the effective limit doubles (observed). Exact global limits need Redis.
 5. **TLS** on the ingress (cert-manager, or a self-signed cert for local).
-6. **Images under the hardened pod settings** (corrected: an earlier note wrongly said `nginx-unprivileged` works; that test had added a `/tmp` tmpfs the pods do not have). Verified under the exact settings, in Docker and through the API on the cluster: `hashicorp/http-echo`, `traefik/whoami`, `ghcr.io/stefanprodan/podinfo`, `jmalloc/echo-server`, `ealen/echo-server`, `mendhak/http-https-echo`. Crash-looping (verified): stock `nginx` and `nginxinc/nginx-unprivileged` (read-only filesystem). Disabling `readOnlyRootFilesystem` fixes `nginx-unprivileged` only. Option to consider: mount a small writable `emptyDir` at `/tmp` in every pod (keeps the read-only root, unlocks more images).
+6. **Pod security trade-off:** with the default (off) any public image runs (stock `nginx`, `httpd`, `postgres` verified) but workloads are less isolated. Turning it on is one setting; with it on, images that write to disk use `writable_paths` / `run_as_user` (root and `..`, `/proc`, `/sys`, `/dev` paths are rejected). Verified ON: nginx, nginx-unprivileged, httpd, caddy, redis, prometheus, http-echo, whoami, podinfo, jmalloc/ealen/mendhak echo servers. Not possible ON: `postgres` (needs root). History: an earlier note wrongly said `nginx-unprivileged` worked; that test had added a `/tmp` tmpfs the pods did not have.
 7. **Pin NetworkPolicy egress to the API server CIDR** (`networkPolicy.apiServerCidr`) instead of port-only.
 
 ### Production hardening (later)

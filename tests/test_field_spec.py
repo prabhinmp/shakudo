@@ -10,7 +10,7 @@ import pytest
 MANDATORY = ["name", "namespace", "image", "port",
              "resources.requests.cpu", "resources.requests.memory",
              "resources.limits.cpu", "resources.limits.memory"]
-OPTIONAL = ["replicas", "env", "labels", "command", "args"]
+OPTIONAL = ["replicas", "env", "labels", "command", "args", "writable_paths", "run_as_user"]
 
 
 def drop(body, dotted):
@@ -25,7 +25,8 @@ def drop(body, dotted):
 def full_body(valid_body):
     """A body that sets EVERY field, so each test can remove exactly one."""
     b = copy.deepcopy(valid_body)
-    b.update(replicas=3, env=[{"name": "MODE", "value": "x"}], labels={"app": "web"}, command=["/bin/app"], args=["--v"])
+    b.update(replicas=3, env=[{"name": "MODE", "value": "x"}], labels={"app": "web"}, command=["/bin/app"], args=["--v"],
+             writable_paths=["/var/cache/nginx"], run_as_user=101)
     return b
 
 

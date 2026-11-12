@@ -105,7 +105,7 @@ Body shape: `{"error": {"code": "...", "message": "...", "details": [...]}}`
 4. **Protected namespaces:** `kube-system`, `kube-public`, `kube-node-lease`, `default` and any `kube-*` are hard-coded off-limits. Enforced in the routes **and** in the Kubernetes service layer; config can add to the list but never remove from it.
 5. **Scope:** the API only lists/changes objects labelled `app.kubernetes.io/managed-by=deploy-api`.
 6. **Input:** strict schemas (unknown fields rejected), DNS-1123 names, resource caps, registry allowlist, replica cap, 64 KiB body limit. Validation errors never echo submitted values.
-7. **Workloads it creates:** non-root, no privilege escalation, all capabilities dropped, read-only root filesystem, seccomp `RuntimeDefault`, **no ServiceAccount token mounted**.
+7. **Workloads it creates:** no ServiceAccount token is mounted into them. A pod `securityContext` (non-root, read-only root filesystem, no capabilities, seccomp, no privilege escalation) is available behind `DEPLOY_API_POD_HARDENING=true` and is **off by default**.
 8. **Abuse control:** per-subject read/write rate limits; failed-auth lockout per IP.
 9. **Audit:** JSON log for every mutation and every denied request (401/403/429, cross-namespace probes). Never logs tokens or bodies.
 10. **Cluster access:** least-privilege ClusterRole (no secrets, no node access, no RBAC changes, no pod/namespace delete), NetworkPolicy limiting ingress and egress, non-root read-only container, PodDisruptionBudget.
@@ -115,7 +115,7 @@ Body shape: `{"error": {"code": "...", "message": "...", "details": [...]}}`
 Environment variables (`DEPLOY_API_` prefix); in Helm they come from `values.yaml`. Key ones:
 `JWT_SECRET` (required), `ALLOWED_REGISTRIES`, `DENIED_NAMESPACES`, `MAX_REPLICAS`,
 `RATE_LIMIT_READ_PER_MIN` (120), `RATE_LIMIT_WRITE_PER_MIN` (30), `RATE_LIMIT_AUTH_FAIL_PER_MIN` (10),
-`POD_READ_ONLY_ROOT_FS` (true).
+`POD_HARDENING` (false: pods run as their image intends; true enforces the lock-down), `POD_READ_ONLY_ROOT_FS` (true, only with hardening on).
 
 ## Project layout
 
@@ -135,7 +135,7 @@ Dockerfile
 
 - **Rate limits and the IP lockout are per pod and in-memory.** With 2 replicas the effective limit is double (verified: 240 of 320 requests allowed against a 120 limit). Behind the ingress the lockout sees the ingress pod's IP, so one abusive client can lock out all clients for a minute. Fix: shared store (Redis) and trusting `X-Forwarded-For` only from the ingress.
 - **Cluster-wide RBAC.** Creating namespaces and deployments anywhere requires cluster-scoped permissions, and RBAC cannot deny namespaces. The app's protected-namespace guard is the real barrier.
-- **Hardened pods need compatible images.** Every pod the API creates runs as non-root (uid 10001) with a read-only root filesystem and no capabilities, and gets **no writable scratch space**. Images that write to their own directories crash with `CrashLoopBackOff`: stock `nginx` (`/var/cache/nginx`) and `nginxinc/nginx-unprivileged` (`/tmp`) both fail with `Read-only file system`. Images verified to run under exactly these settings are listed in [docs/API_TESTING.md](docs/API_TESTING.md#public-images-that-work-with-the-hardened-pods). Turning the read-only filesystem off (`DEPLOY_API_POD_READ_ONLY_ROOT_FS=false` / chart `config.podReadOnlyRootFs: false`) fixes `nginx-unprivileged` (verified) but **not** stock `nginx` (root-owned directories, `Permission denied`).
+- **Pod security on workloads is a switch, OFF by default.** Pods the API creates run as their image intends (often root, writable filesystem, default capabilities), so any public image runs, including stock `nginx` and `postgres` (verified on the cluster). That is a deliberate operator decision and a weaker posture for the workloads. To enforce the lock-down (non-root uid 10001, read-only root filesystem, no capabilities, seccomp, no privilege escalation) set `DEPLOY_API_POD_HARDENING=true` (chart: `config.podHardening: true`). With it on, images that write to disk need the optional request fields `writable_paths` and `run_as_user`; see [docs/API_TESTING.md](docs/API_TESTING.md#public-images-and-pod-security).
 - HS256 shared secret, no revocation: use short expiries; move to OIDC/JWKS for production.
 - ID lookup lists all managed deployments (O(n)).
 - No TLS on the local ingress; the image is not yet pushed to a registry; nothing is committed to git yet.

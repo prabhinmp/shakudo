@@ -14,6 +14,9 @@ config:
   rateLimitReadPerMin: 120
   rateLimitWritePerMin: 30
   rateLimitAuthFailPerMin: 10
+  # Security context on the pods this API creates. false (default) = pods run as their image intends.
+  # true = enforce non-root, read-only root filesystem, no capabilities, seccomp.
+  podHardening: false
   podReadOnlyRootFs: true
   logLevel: INFO
 
