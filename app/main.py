@@ -1,13 +1,33 @@
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import deployments, health
 from app.config import MIN_SECRET_BYTES, Settings, get_settings
 from app.core.ratelimit import Limiters
 from app.errors import register_error_handlers
 from app.services.k8s import KubernetesService
+
+
+# Scripts/styles only from our own origin; the UI talks only to this same origin.
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+UI_DIR = Path(__file__).parent / "static"  # the built React app (ui/dist) is copied here by the Dockerfile
+
+
+def mount_ui(app: FastAPI) -> None:
+    """Serve the web UI at /ui from the same origin as the API (so no CORS is needed).
+    Skipped when the UI has not been built, so API-only runs and tests are unaffected."""
+    if not (UI_DIR / "index.html").is_file():
+        return
+    app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    def root():
+        return RedirectResponse("/ui/")
 
 
 def create_app(settings: Settings | None = None, kube=None, limiters: Limiters | None = None) -> FastAPI:
@@ -48,8 +68,13 @@ def create_app(settings: Settings | None = None, kube=None, limiters: Limiters |
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = CSP
         return response
 
     app.include_router(health.router)
     app.include_router(deployments.router)
+    app.include_router(deployments.namespaces_router)
+    mount_ui(app)
     return app

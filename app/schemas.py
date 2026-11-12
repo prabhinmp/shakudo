@@ -5,8 +5,9 @@ never smuggle in settings we did not intend to support (privileged, hostPath, ..
 """
 import re
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY_VALUE = "deploy-api"
@@ -158,6 +159,21 @@ class Replicas(BaseModel):
     unavailable: int
 
 
+Health = Literal["healthy", "degraded", "down", "idle"]
+
+
+def replica_health(r: Replicas) -> Health:
+    """Health from replica counts alone (all a list call knows).
+    idle = scaled to zero on purpose; down = wanted but nothing ready; degraded = some missing."""
+    if r.desired == 0:
+        return "idle"
+    if r.ready == 0:
+        return "down"
+    if r.ready < r.desired or r.unavailable > 0:
+        return "degraded"
+    return "healthy"
+
+
 class DeploymentSummary(BaseModel):
     id: str
     name: str
@@ -166,6 +182,11 @@ class DeploymentSummary(BaseModel):
     labels: dict[str, str]
     replicas: Replicas
     created_at: datetime | None = None
+
+    @computed_field
+    @property
+    def health(self) -> Health:
+        return replica_health(self.replicas)
 
 
 class ContainerStatus(BaseModel):
@@ -190,6 +211,26 @@ class Condition(BaseModel):
     last_transition_time: datetime | None = None
 
 
+# Container states that mean "this pod will not start by itself".
+BROKEN_STATES = ("CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError",
+                 "InvalidImageName", "terminated: Error", "terminated: OOMKilled")
+
+
 class DeploymentDetail(DeploymentSummary):
     pods: list[PodStatus]
     conditions: list[Condition]
+
+    @computed_field
+    @property
+    def health(self) -> Health:
+        """Replica health, made stricter by what the pods say: a pod stuck in CrashLoopBackOff
+        means the deployment is not healthy even if counts look briefly fine."""
+        base = replica_health(self.replicas)
+        broken = any(b in c.state for p in self.pods for c in p.container_statuses for b in BROKEN_STATES)
+        if broken and base == "healthy":
+            return "degraded"
+        return base
+
+
+class NamespaceList(BaseModel):
+    namespaces: list[str]

@@ -22,9 +22,11 @@ from app.schemas import (
     DeploymentDetail,
     DeploymentPatch,
     DeploymentSummary,
+    NamespaceList,
 )
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
+namespaces_router = APIRouter(prefix="/api/namespaces", tags=["namespaces"])
 
 IdPath = Path(pattern=UUID_RE, description="Deployment UID")
 
@@ -72,6 +74,17 @@ def list_deployments(
         return kube.list_deployments(namespace)
     # No filter: return only what this caller is allowed to see.
     return [d for d in kube.list_deployments(None) if namespace_allowed(principal, d.namespace, settings)]
+
+
+@namespaces_router.get("", response_model=NamespaceList)
+def list_namespaces(
+    principal: Principal = Depends(require_role("viewer")),
+    settings: Settings = Depends(get_settings_dep),
+    kube=Depends(get_kube),
+):
+    """Namespaces that hold managed deployments AND that this caller may see (for the UI filter)."""
+    found = {d.namespace for d in kube.list_deployments(None) if namespace_allowed(principal, d.namespace, settings)}
+    return NamespaceList(namespaces=sorted(found))
 
 
 @router.get("/{id}", response_model=DeploymentDetail)
