@@ -95,3 +95,13 @@ def test_config_cannot_remove_protection(ns, valid_body):
     svc = KubernetesService(_Explode(), _Explode(), _Explode(), weak)
     with pytest.raises(ForbiddenError):
         svc.ensure_namespace(ns)
+
+
+def test_manifest_without_user_labels_still_has_selector_and_ownership_labels(valid_body):
+    """labels are optional, so the API's own labels must carry the selector and managed-by ownership alone."""
+    valid_body.pop("labels")
+    m = build_manifest(DeploymentCreate(**valid_body), SETTINGS)
+    own = {"app.kubernetes.io/name": "web", "app.kubernetes.io/managed-by": "deploy-api"}
+    assert m["metadata"]["labels"] == own
+    assert m["spec"]["template"]["metadata"]["labels"] == own
+    assert m["spec"]["selector"]["matchLabels"] == own      # selector matches the pod template, so pods are adopted

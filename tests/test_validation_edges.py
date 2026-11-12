@@ -174,3 +174,44 @@ def test_trailing_whitespace_in_quantities_is_400(client, auth, valid_body, kube
                                          ("env", [{"name": "A\n", "value": "1"}])])
 def test_trailing_newline_in_labels_and_env_is_400(client, auth, valid_body, kube, field, value):
     assert_clean_400(post(client, auth, mutated(valid_body, **{field: value})), kube)
+
+
+# ---------------- helpful JSON syntax errors (no content echoed) ----------------
+USER_BODY_TRAILING_COMMA = '''{
+    "name": "echo", "namespace": "team-a",
+    "image": "nginx:latest", "port": 80, "replicas": 2,
+    "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}},
+  }'''
+
+
+def test_json_syntax_error_reports_line_and_column_not_a_fake_field(client, auth, kube):
+    r = raw_post(client, auth, USER_BODY_TRAILING_COMMA.encode())
+    assert_clean_400(r, kube)
+    d = r.json()["error"]["details"][0]
+    assert d["field"] == "(body)"                                   # not "215"
+    assert d["message"].startswith("Malformed JSON:") and "trailing comma" in d["message"] and "line 4" in d["message"]
+
+
+def test_json_error_never_echoes_body_content(client, auth, kube):
+    r = raw_post(client, auth, b'{"env": [{"name": "PASSWORD", "value": "hunter2"},]}')
+    assert r.status_code == 400 and "hunter2" not in r.text and "PASSWORD" not in r.text
+
+
+def test_after_fixing_the_comma_the_request_is_valid_because_labels_are_optional(client, auth, kube):
+    fixed = USER_BODY_TRAILING_COMMA.replace("}},\n  }", "}}\n  }")
+    r = raw_post(client, auth, fixed.encode())
+    assert r.status_code == 201, r.text                      # no labels given, and that is fine
+
+
+# ---------------- labels are optional ----------------
+@pytest.mark.parametrize("how", ["omitted", "empty"])
+def test_labels_are_optional(client, auth, valid_body, how):
+    b = copy.deepcopy(valid_body)
+    b.pop("labels") if how == "omitted" else b.update(labels={})
+    r = post(client, auth, b)
+    assert r.status_code == 201, r.text      # (the API's own labels are added by the manifest builder: see test_k8s_service.py)
+
+
+def test_supplied_labels_are_still_validated_and_reserved_keys_still_blocked(client, auth, valid_body, kube):
+    for bad in ({"bad key!": "v"}, {"app.kubernetes.io/managed-by": "x"}, {"k": "v" * 64}, {f"k{i}": "v" for i in range(21)}):
+        assert_clean_400(post(client, auth, mutated(valid_body, labels=bad)), kube)

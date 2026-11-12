@@ -86,6 +86,19 @@ def _audit_denied(request: Request, exc: AppError) -> None:
     )
 
 
+def _json_error_message(err: dict, raw) -> str:
+    """'Malformed JSON: <reason> (line L, column C)'. For a JSON error pydantic puts the character
+    offset in loc, which used to be shown as a meaningless "field". Only the position is derived from
+    the body; none of its content is echoed back."""
+    reason = (err.get("ctx") or {}).get("error") or "invalid JSON"
+    pos = err["loc"][1] if len(err["loc"]) > 1 and isinstance(err["loc"][1], int) else None
+    if pos is None or not isinstance(raw, str):
+        return f"Malformed JSON: {reason}"
+    line = raw.count("\n", 0, pos) + 1
+    column = pos - (raw.rfind("\n", 0, pos) + 1) + 1
+    return f"Malformed JSON: {reason} (line {line}, column {column})"
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error(request: Request, exc: AppError):
@@ -100,10 +113,12 @@ def register_error_handlers(app: FastAPI) -> None:
     async def validation_error(_: Request, exc: RequestValidationError):
         # Only field location + message are returned. We deliberately do NOT echo the
         # submitted value back, because it could contain secrets (e.g. env values).
-        details = [
-            {"field": ".".join(str(p) for p in e["loc"] if p != "body"), "message": e["msg"]}
-            for e in exc.errors()
-        ]
+        details = []
+        for e in exc.errors():
+            if e["type"] == "json_invalid":
+                details.append({"field": "(body)", "message": _json_error_message(e, exc.body)})
+            else:
+                details.append({"field": ".".join(str(p) for p in e["loc"] if p != "body"), "message": e["msg"]})
         return JSONResponse(_body("invalid_input", "Request validation failed", details), status_code=400)
 
     @app.exception_handler(StarletteHTTPException)

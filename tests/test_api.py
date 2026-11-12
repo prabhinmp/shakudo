@@ -58,11 +58,11 @@ DELETE = object()
     _mut("resources.limits.memory", "12XB"), _mut("resources.limits.memory", "0Mi"),
     _mut("resources.requests.cpu", "500m"),                                  # request > limit
     _mut("resources.limits.cpu", "64"),                                      # above cap
-    _mut("labels", {}), _mut("labels", {"bad key!": "v"}), _mut("labels", {"app.kubernetes.io/managed-by": "x"}),
+    _mut("labels", {"bad key!": "v"}), _mut("labels", {"app.kubernetes.io/managed-by": "x"}),
     _mut("env", [{"name": "1BAD", "value": "v"}]),
     _mut("env", [{"name": "A", "value": "1"}, {"name": "A", "value": "2"}]),
     _mut("name", DELETE), _mut("namespace", DELETE), _mut("image", DELETE), _mut("port", DELETE),
-    _mut("resources", DELETE), _mut("labels", DELETE),                       # mandatory fields
+    _mut("resources", DELETE),                                              # mandatory fields
     _mut("privileged", True), _mut("hostNetwork", True),                     # unknown fields rejected
 ])
 def test_invalid_input_is_400(client, auth, valid_body, mutation):

@@ -108,7 +108,8 @@ class DeploymentCreate(Strict):
     port: StrictInt = Field(ge=1, le=65535)
     resources: Resources
     env: list[EnvVar] = Field(default_factory=list, max_length=50)
-    labels: dict[str, str] = Field(min_length=1, max_length=20)
+    # optional: the API always adds app.kubernetes.io/name and managed-by itself (selector + ownership)
+    labels: dict[str, str] = Field(default_factory=dict, max_length=20)
     command: list[str] | None = Field(default=None, max_length=20)
     args: list[str] | None = Field(default=None, max_length=50)
 
