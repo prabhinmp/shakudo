@@ -10,7 +10,7 @@ deployments it created itself.
 | Data | Every GET reads the live cluster (no cache, `Cache-Control: no-store`); POST pre-checks the cluster and rejects an existing name (even if not created by the API) before creating anything |
 | Auth | Client → API: JWT bearer (HS256). API → Kubernetes: pod ServiceAccount token + RBAC |
 | Packaging | Docker image (non-root) + Helm chart |
-| More docs | [Feature/progress catalog](docs/CATALOG.md) · [curl test guide](docs/API_TESTING.md) · [Technology stack](docs/TECH_STACK.md) |
+| More docs | [Feature/progress catalog](docs/CATALOG.md) · [curl test guide](docs/API_TESTING.md) · [Technology stack](docs/TECH_STACK.md) · [Authentication: who gets a token](docs/AUTHENTICATION.md) |
 
 ## Architecture
 
@@ -70,6 +70,8 @@ CI stops at the first failing stage, so an image is only built after all tests p
 `REGISTRY=<repo> ./scripts/ci.sh --push` additionally tags and pushes, only after everything passed.
 
 ## Authentication & authorization
+
+**There are no user accounts or login.** The platform operator (whoever can read the signing secret with `kubectl`) mints one signed token per person with `scripts/mint-token.sh`, choosing the role and namespaces, and hands over only that token. The API verifies the signature on each request. Full explanation, per-person examples and limits: **[docs/AUTHENTICATION.md](docs/AUTHENTICATION.md)**.
 
 **Token claims:** `sub`, `iss`, `aud`, `exp`, `role` (`viewer`|`operator`|`admin`), `namespaces` (list, `*` suffix wildcards ok).
 

@@ -31,7 +31,7 @@ The API is then at `http://deploy-api.localtest.me:18080`. (`localtest.me` is pu
 
 ## 1. Set up variables and tokens
 
-Callers authenticate with a JWT (`Authorization: Bearer <token>`). Tokens are signed with the secret stored in the
+Callers authenticate with a JWT (`Authorization: Bearer <token>`). There are no accounts or login: you mint the tokens yourself with the cluster's signing secret and hand each person theirs (see [docs/AUTHENTICATION.md](AUTHENTICATION.md)). Tokens are signed with the secret stored in the
 cluster; [scripts/mint-token.sh](../scripts/mint-token.sh) creates them with plain bash + openssl.
 
 ```bash
